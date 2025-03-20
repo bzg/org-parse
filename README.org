@@ -1,0 +1,45 @@
+#+title: Org parse
+
+Take an Org file and output it as data in json/yaml/edn format.
+
+* Install and run
+
+Assuming [[https://github.com/babashka/bbin][bbin]] is installed:
+
+#+begin_src sh
+bbin install https://raw.githubusercontent.com/bzg/org-parse/refs/heads/main/org-parse.clj
+#+end_src
+
+#+begin_src sh
+org-parse example.org
+#+end_src
+
+Check help with =-h= or =--help=.
+
+* Feedback
+
+To get or provide feedback, send an email to *bzg@bzg.fr*.
+
+* Requirements
+
+=org-parse= is written as a [[https://clojure.org][Clojure]] [[https://babashka.org][Babashka]] script and we recommend
+installing it with [[https://github.com/babashka/bbin][bbin]]. Install everything:
+
+#+begin_src sh
+brew install babashka/brew/bbin
+#+end_src
+
+For detailed installation instructions:
+
+- [[https://clojure.org/guides/install_clojure][Install Clojure]]
+- [[https://github.com/babashka/babashka#installation][Install babashka]]
+- [[https://github.com/babashka/bbin#installation][Install bbin]]
+
+* Support the Clojure(script) ecosystem
+
+If you like Clojure(script), you can support the ecosystem by making a
+donation to [[https://www.clojuriststogether.org][clojuriststogether.org]].
+
+* License
+
+The code in this repository is licensed under [[LICENSES/EPL-2.0.txt][EPL-2.0]].
