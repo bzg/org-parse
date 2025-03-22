@@ -7,7 +7,7 @@ Take an Org file and output it as data in json/yaml/edn format.
 Assuming [[https://github.com/babashka/bbin][bbin]] is installed:
 
 #+begin_src sh
-bbin install https://raw.githubusercontent.com/bzg/org-parse/refs/heads/main/org-parse.clj
+bbin install io.github.bzg/org-parse
 #+end_src
 
 #+begin_src sh

@@ -4,7 +4,7 @@
 ;; SPDX-License-Identifier: EPL-2.0
 ;; License-Filename: LICENSES/EPL-2.0.txt
 
-(ns org-parse
+(ns bzg.org-parse
   (:require [clojure.string :as str]
             [clojure.java.io :as io]
             [cheshire.core :as json]
