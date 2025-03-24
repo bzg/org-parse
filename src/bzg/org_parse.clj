@@ -519,19 +519,39 @@
                  (filterv (complement str/blank?) %)))))
 
 (defn parse-org-file
-  "Main function to parse an Org file."
+  "Main function to parse an Org file using transducers."
   [file-path format-keyword]
-  (let [unwrapped-lines      (-> file-path slurp unwrap-text str/split-lines)
-        file-headers         (collect-file-headers unwrapped-lines)
-        first-headline-idx   (or (first (keep-indexed #(when (org-headline? %2) %1)
-                                                      unwrapped-lines))
+  (let [;; Read and unwrap file content
+        unwrapped-lines      (-> file-path slurp unwrap-text str/split-lines)
+        ;; Collect file headers
+        file-headers         (->> unwrapped-lines
+                                  (take-while
+                                   #(or (comment-line? %)
+                                        (metadata-line? %)
+                                        (str/blank? %)
+                                        (not (and (not (org-headline? %))
+                                                  (not (comment-line? %))
+                                                  (not (metadata-line? %))
+                                                  (not (str/blank? %))))))
+                                  (into []))
+        ;; Find first headline index
+        first-headline-idx   (or (first
+                                  (sequence
+                                   (comp
+                                    (keep-indexed #(when (org-headline? %2) %1))
+                                    (take 1))
+                                   unwrapped-lines))
                                  (count unwrapped-lines))
+        ;; Extract pre-headline content
         pre-headline-content (when (< (count file-headers) first-headline-idx)
-                               (subvec unwrapped-lines
-                                       (count file-headers)
-                                       first-headline-idx))
-        content-lines        (drop first-headline-idx unwrapped-lines)
-        ;; Process headlines with reduce
+                               (into []
+                                     (comp
+                                      (drop (count file-headers))
+                                      (take (- first-headline-idx (count file-headers))))
+                                     unwrapped-lines))
+        ;; Get content lines
+        content-lines        (into [] (drop first-headline-idx) unwrapped-lines)
+        ;; Process headlines
         result
         (reduce
          (fn [{:keys [headlines current path] :as acc} line]
@@ -574,15 +594,14 @@
          {:headlines [], :current nil, :path []}
          content-lines)
         ;; Final processing
-        final-headlines
-        (if (:current result)
-          (conj (:headlines result)
-                (process-headline (:current result) format-keyword))
-          (:headlines result))
-        org-data
-        (cond-> {:headlines final-headlines}
-          (seq file-headers)         (assoc :file-headers file-headers)
-          (seq pre-headline-content) (assoc :pre-headline-content pre-headline-content))]
+        final-headlines      (if (:current result)
+                               (conj (:headlines result)
+                                     (process-headline (:current result) format-keyword))
+                               (:headlines result))
+        ;; Assemble final data structure
+        org-data             (cond-> {:headlines final-headlines}
+                               (seq file-headers)         (assoc :file-headers file-headers)
+                               (seq pre-headline-content) (assoc :pre-headline-content pre-headline-content))]
     org-data))
 
 ;; Headline Filtering
