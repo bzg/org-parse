@@ -22,10 +22,10 @@
     :parse-fn re-pattern]
    ["-C" "--section-custom-id REGEX" "Only headlines within sections whose CUSTOM_ID property matches regex"
     :parse-fn re-pattern]
-   ["-<" "--max-level LEVEL" "Only headlines with level <= LEVEL"
+   ["-m" "--max-level LEVEL" "Only headlines with level <= LEVEL"
     :parse-fn #(Integer/parseInt %)
     :validate [pos? "Must be a positive number"]]
-   ["->" "--min-level LEVEL" "Only headlines with level >= LEVEL"
+   ["-M" "--min-level LEVEL" "Only headlines with level >= LEVEL"
     :parse-fn #(Integer/parseInt %)
     :validate [pos? "Must be a positive number"]]
    ;; Output options
@@ -47,11 +47,11 @@
                    (format "%-32s %s\n" opt-str desc-str))))
         "\nExamples:
   org-parse notes.org                       # Output notes.json rendering content as markdown
-  org-parse -< 2 notes.org                  # Process headlines with level <= 2
-  org-parse -> 2 notes.org                  # Process headlines with level >= 2
-  org-parse -< 3 -> 2 notes.org             # Process headlines with 2 <= level <= 3
+  org-parse -m 2 notes.org                  # Process headlines with level <= 2
+  org-parse -M 2 notes.org                  # Process headlines with level >= 2
+  org-parse -m 3 -M 2 notes.org             # Process headlines with 2 <= level <= 3
   org-parse -c \"section[0-9]+\" notes.org    # Headlines with CUSTOM_ID matching regex
-  org-parse -< 2 -c \"^ch\" notes.org         # Combine level and CUSTOM_ID filters
+  org-parse -m 2 -c \"^ch\" notes.org         # Combine level and CUSTOM_ID filters
   org-parse -T \"Projects\" notes.org         # Headlines within sections titled 'Projects'
   org-parse -T \"^(WAIT|DONE)$\" notes.org    # Headlines within 'WAIT' or 'DONE'
   org-parse -t \"TODO\" notes.org             # Headlines with title matching 'TODO'
