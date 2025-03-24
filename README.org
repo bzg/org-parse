@@ -20,19 +20,15 @@ Take an Org file and output it as data in json/yaml/edn/org format.
 :   org-parse -f yaml notes.org               # Output in YAML format
 :   org-parse -f org notes.org                # Output in unwrapped org format
 
-* Install and run
+Check help with =org-parse --help=.
+
+* Install
 
 Assuming [[https://github.com/babashka/bbin][bbin]] is installed:
 
 #+begin_src sh
 bbin install io.github.bzg/org-parse
 #+end_src
-
-#+begin_src sh
-org-parse example.org
-#+end_src
-
-Check help with =-h= or =--help=.
 
 * Feedback
 
