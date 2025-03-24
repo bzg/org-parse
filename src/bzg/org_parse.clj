@@ -521,11 +521,10 @@
 (defn parse-org-file
   "Main function to parse an Org file."
   [file-path format-keyword]
-  (let [file-content         (slurp file-path)
-        unwrapped-content    (unwrap-text file-content)
-        unwrapped-lines      (str/split-lines unwrapped-content)
+  (let [unwrapped-lines      (-> file-path slurp unwrap-text str/split-lines)
         file-headers         (collect-file-headers unwrapped-lines)
-        first-headline-idx   (or (first (keep-indexed #(when (org-headline? %2) %1) unwrapped-lines))
+        first-headline-idx   (or (first (keep-indexed #(when (org-headline? %2) %1)
+                                                      unwrapped-lines))
                                  (count unwrapped-lines))
         pre-headline-content (when (< (count file-headers) first-headline-idx)
                                (subvec unwrapped-lines
