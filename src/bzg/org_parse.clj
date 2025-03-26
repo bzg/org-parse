@@ -554,59 +554,73 @@
                                       (take (- first-headline-idx (count file-headers))))
                                      unwrapped-lines))
         ;; Get content lines
-        content-lines        (into [] (drop first-headline-idx) unwrapped-lines)
-        ;; Process headlines
-        result
-        (reduce
-         (fn [{:keys [headlines current path] :as acc} line]
-           (cond
-             ;; New headline
-             (org-headline? line)
-             (let [new-level     (count (re-find #"^\*+" line))
-                   orig-title    (str/trim (subs line new-level))
-                   title         (case format-keyword
-                                   :html     (org->format orig-title :html)
-                                   :markdown (org->format orig-title :markdown)
-                                   orig-title)
-                   path-title    (if (not= format-keyword :plain) orig-title title)
-                   new-path      (update-path-stack path new-level path-title)
-                   new-headline  {:level      new-level
-                                  :title      title
-                                  :content    []
-                                  :properties {}
-                                  :path       new-path}
-                   new-headlines (if current
-                                   (conj headlines (process-headline current format-keyword))
-                                   headlines)]
-               {:headlines new-headlines, :current new-headline, :path new-path})
-             ;; Property drawer
-             (and current (in-property-drawer? (list line)))
-             (let [[props _]        (process-property-drawer (list line))
-                   updated-headline (update current :properties merge props)]
-               (assoc acc :current updated-headline))
-             ;; Regular content
-             :else
-             (if current
-               (if (and (metadata-line? line)
-                        (not (block-begin? line))
-                        (not (block-end? line)))
-                 ;; Skip metadata lines that are not block markers
-                 acc
-                 ;; Add other content
-                 (update acc :current update :content conj line))
-               acc)))
-         {:headlines [], :current nil, :path []}
-         content-lines)
-        ;; Final processing
-        final-headlines      (if (:current result)
-                               (conj (:headlines result)
-                                     (process-headline (:current result) format-keyword))
-                               (:headlines result))
-        ;; Assemble final data structure
-        org-data             (cond-> {:headlines final-headlines}
-                               (seq file-headers)         (assoc :file-headers file-headers)
-                               (seq pre-headline-content) (assoc :pre-headline-content pre-headline-content))]
-    org-data))
+        content-lines        (into [] (drop first-headline-idx) unwrapped-lines)]
+    ;; Process headlines
+    (loop [lines     content-lines
+           headlines []
+           current   nil
+           path      []]
+      (if (empty? lines)
+        ;; End of file - add the last headline if any
+        (let [final-headlines (if current
+                                (conj headlines (process-headline current format-keyword))
+                                headlines)]
+          {:headlines            final-headlines
+           :file-headers         file-headers
+           :pre-headline-content pre-headline-content})
+        (let [line (first lines)]
+          (cond
+            ;; New headline
+            (org-headline? line)
+            (let [new-level     (count (re-find #"^\*+" line))
+                  orig-title    (str/trim (subs line new-level))
+                  title         (case format-keyword
+                                  :html     (org->format orig-title :html)
+                                  :markdown (org->format orig-title :markdown)
+                                  orig-title)
+                  path-title    (if (not= format-keyword :plain) orig-title title)
+                  new-path      (update-path-stack path new-level path-title)
+                  new-headline  {:level      new-level
+                                 :title      title
+                                 :content    []
+                                 :properties {}
+                                 :path       new-path}
+                  new-headlines (if current
+                                  (conj headlines (process-headline current format-keyword))
+                                  headlines)]
+              (recur (rest lines) new-headlines new-headline new-path))
+            ;; Property drawer
+            (and current (str/starts-with? (str/trim line) ":PROPERTIES:"))
+            (let [;; Collect all drawer lines until :END:
+                  drawer-lines     (take-while #(not (str/includes? (str/trim %) ":END:"))
+                                               (rest lines))
+                  ;; Add :END: line to the drawer lines
+                  end-line         (first (drop (count drawer-lines) (rest lines)))
+                  all-drawer       (concat [line] drawer-lines [end-line])
+                  ;; Process the drawer
+                  [props _]        (process-property-drawer all-drawer)
+                  ;; Update the headline with properties
+                  updated-headline (update current :properties merge props)]
+              ;; Continue with the rest of the lines after the drawer
+              (recur (drop (+ 2 (count drawer-lines)) lines)
+                     headlines
+                     updated-headline
+                     path))
+            ;; Regular content
+            :else
+            (if current
+              (if (and (metadata-line? line)
+                       (not (block-begin? line))
+                       (not (block-end? line)))
+                ;; Skip metadata lines that are not block markers
+                (recur (rest lines) headlines current path)
+                ;; Add other content
+                (recur (rest lines)
+                       headlines
+                       (update current :content conj line)
+                       path))
+              ;; No current headline - skip
+              (recur (rest lines) headlines nil path))))))))
 
 ;; Headline Filtering
 (defn filter-headlines
