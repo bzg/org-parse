@@ -357,6 +357,10 @@
                                     cleaned      (clean-list-item line)
                                     formatted    (org->format cleaned format)]
                                 (cond
+                                  ;; For HTML, use the renderer
+                                  (and (= format :html) (or is-unordered is-ordered))
+                                  ((:list-item renderers) formatted)
+                                  ;; For other formats, use the original approach
                                   is-unordered (str "- " formatted)
                                   is-ordered   (let [num (re-find #"\d+" line)]
                                                  (str num ". " formatted))
