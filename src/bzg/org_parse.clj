@@ -458,7 +458,6 @@
   (if (empty? content-lines)
     ""
     (let [content-blocks   (partition-by line-category content-lines)
-          ;; Helper to determine line category
           processed-blocks (map #(process-content-block % format) content-blocks)]
       (case format
         :html     (str/join "\n" processed-blocks)
@@ -693,12 +692,20 @@
                            (not= format "org"))
                     (mapv #(-> % (dissoc :level)) headlines)
                     headlines)
-        ;; Remove empty content arrays for non-org formats
+        ;; For all non-org formats, ensure content is converted to a string
+        ;; to preserve HTML formatting
         headlines (if (= format "org")
                     headlines
-                    (mapv #(if (seq (:content %))
-                             %
-                             (dissoc % :content)) headlines))]
+                    (mapv (fn [headline]
+                            (if (seq (:content headline))
+                              ;; Convert content vector to a single string to preserve HTML
+                              (update headline :content
+                                      (fn [content]
+                                        (if (string? content)
+                                          content
+                                          (str/join "\n" content))))
+                              (dissoc headline :content)))
+                          headlines))]
     (case format
       "edn"  (mapv #(let [path-list (when (seq (:path %)) (apply list (:path %)))]
                       (if path-list
