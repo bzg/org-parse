@@ -4,21 +4,25 @@ Take an Org file and output it as data in json/yaml/edn/org format.
 
 * Usage examples
 
-:   org-parse notes.org                       # Output notes.json rendering content as markdown
-:   org-parse -m 2 notes.org                  # Process headlines with level <= 2
-:   org-parse -M 2 notes.org                  # Process headlines with level >= 2
-:   org-parse -m 3 -M 2 notes.org             # Process headlines with 2 <= level <= 3
-:   org-parse -c "section[0-9]+" notes.org    # Headlines with CUSTOM_ID matching regex
-:   org-parse -m 2 -c "^ch" notes.org         # Combine level and CUSTOM_ID filters
-:   org-parse -T "Projects" notes.org         # Headlines within sections titled 'Projects'
-:   org-parse -T "^(WAIT|DONE)$" notes.org    # Headlines within 'WAIT' or 'DONE'
-:   org-parse -t "TODO" notes.org             # Headlines with title matching 'TODO'
-:   org-parse -C "chapter\d+" notes.org       # Headlines within sections with CUSTOM_ID matching regex
-:   org-parse -r html notes.org               # Render content as HTML
-:   org-parse -r org notes.org                # Render content as Org
+:   org-parse notes.org                       # Output JSON with content rendered as Markdown
 :   org-parse -f edn notes.org                # Output in EDN format
 :   org-parse -f yaml notes.org               # Output in YAML format
-:   org-parse -f org notes.org                # Output in unwrapped org format
+:   org-parse -f org notes.org                # Output in Org format (unwrapped)
+:   org-parse -r html notes.org               # Render content as HTML in JSON output
+:   org-parse -r org notes.org                # Keep content as Org in JSON output
+:   org-parse -e markdown notes.org           # Export full document as Markdown
+:   org-parse -e html notes.org               # Export full document as HTML
+:   org-parse -e org notes.org                # Export full document as Org
+:   org-parse -n notes.org                    # Preserve original line breaks (no unwrap)
+:   org-parse -m 2 notes.org                  # Filter: headlines with level <= 2
+:   org-parse -M 2 notes.org                  # Filter: headlines with level >= 2
+:   org-parse -m 3 -M 2 notes.org             # Filter: headlines with 2 <= level <= 3
+:   org-parse -t "TODO" notes.org             # Filter: title matches regex
+:   org-parse -T "Projects" notes.org         # Filter: ancestor title matches regex
+:   org-parse -i "section[0-9]+" notes.org    # Filter: ID or CUSTOM_ID matches regex
+:   org-parse -I "chapter\d+" notes.org       # Filter: ancestor ID or CUSTOM_ID matches regex
+:   org-parse -m 2 -i "^ch" notes.org         # Combine filters (all must match)
+:   cat notes.org | org-parse -               # Read from stdin
 
 Check help with =org-parse --help=.
 
