@@ -909,18 +909,7 @@ li > p { margin-top: 0.5em; }
   (str/join \newline
             ["Org AST Parser - Parse Org files into AST"
              "" "Usage: org-ast.clj [options] <org-file>"
-             "" "Options:" summary
-             "" "Use '-' to read from stdin."
-             "" "Output formats (-f): json (default), edn, yaml, org"
-             "Content rendering format (-r): md (default), html, org"
-             "Export document (-e): markdown, html, org"
-             "" "Features:"
-             "  - Headlines with TODO states, priorities, and tags"
-             "  - Timestamps (active and inactive)"
-             "  - Footnotes (definitions and references)"
-             "  - Generic blocks (#+BEGIN_X ... #+END_X)"
-             "  - Parse error collection"
-             "" "Filters can be combined. All must match."]))
+             "" "Options:" summary]))
 
 (defn -main [& args]
   (let [{:keys [options arguments errors summary]} (cli/parse-opts args cli-options)]
