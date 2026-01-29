@@ -24,7 +24,17 @@
 (defn add-parse-error! [line-num message]
   (swap! *parse-errors* conj {:line line-num :message message}))
 
-(defn make-node [type & {:as fields}] (merge {:type type} fields))
+(defn empty-value?
+  "True if value is nil, empty collection, or blank string."
+  [v]
+  (or (nil? v)
+      (and (coll? v) (empty? v))
+      (and (string? v) (str/blank? v))))
+
+(defn make-node
+  "Create an AST node, filtering out empty values."
+  [type & {:as fields}]
+  (into {:type type} (remove (fn [[_ v]] (empty-value? v)) fields)))
 
 ;; Regex Patterns
 (def headline-full-pattern #"^(\*+)\s+(?:(TODO|DONE)\s+)?(?:\[#([A-Z])\]\s+)?(.+?)(?:\s+(:[:\w]+:))?\s*$")
@@ -359,32 +369,31 @@
   (let [{:keys [line num]} (first indexed-lines)]
     (if-let [[_ block-type args] (re-matches generic-block-begin-pattern line)]
       (let [block-type-lower (str/lower-case block-type)
-            end-pattern (re-pattern (str "(?i)^\\s*#\\+END_" block-type "\\s*$"))]
+            end-pattern (re-pattern (str "(?i)^\\s*#\\+END_" block-type "\\s*$"))
+            make-block-node
+            (fn [content & {:keys [warning]}]
+              (case block-type-lower
+                "src" (make-node
+                       :src-block
+                       :language (or (first (str/split (or args "") #"\s+")) "")
+                       :args args :content (str/join "\n" content) :line num
+                       :warning warning :error-line (when warning num))
+                "quote" (make-node
+                         :quote-block :content (str/join "\n" content) :line num
+                         :warning warning :error-line (when warning num))
+                (make-node :block :block-type (keyword block-type-lower)
+                           :args (when args (str/trim args))
+                           :content (str/join "\n" content)
+                           :line num :warning warning
+                           :error-line (when warning num))))]
         (loop [[{:keys [line]} & more :as remaining] (rest indexed-lines)
                content []]
           (cond
             (empty? remaining)
             (do (add-parse-error! num (str "Unterminated " block-type " block"))
-                [(case block-type-lower
-                   "src" (make-node :src-block :language (or (first (str/split (or args "") #"\s+")) "")
-                                    :args args :content (str/join "\n" content) :line num
-                                    :warning "Unterminated src block" :error-line num)
-                   "quote" (make-node :quote-block :content (str/join "\n" content) :line num
-                                      :warning "Unterminated quote block" :error-line num)
-                   (make-node :block :block-type (keyword block-type-lower)
-                              :args (when args (str/trim args)) :content (str/join "\n" content)
-                              :line num :warning (str "Unterminated " block-type " block") :error-line num))
-                 []])
-
+                [(make-block-node content :warning (str "Unterminated " block-type " block")) []])
             (re-matches end-pattern line)
-            [(case block-type-lower
-               "src" (make-node :src-block :language (or (first (str/split (or args "") #"\s+")) "")
-                                :args args :content (str/join "\n" content) :line num)
-               "quote" (make-node :quote-block :content (str/join "\n" content) :line num)
-               (make-node :block :block-type (keyword block-type-lower)
-                          :args (when args (str/trim args)) :content (str/join "\n" content) :line num))
-             more]
-
+            [(make-block-node content) more]
             :else
             (recur more (conj content line)))))
       [nil indexed-lines])))
@@ -395,16 +404,19 @@
            content []]
       (if (or (empty? remaining) (not (pred line)))
         (when (seq content)
-          [(make-node node-type :content (str/join "\n" content) :line start-line-num) remaining])
+          [(make-node node-type :content (str/join "\n" content)
+                      :line start-line-num) remaining])
         (recur more (conj content (extract-fn line)))))))
 
 (defn parse-comment [indexed-lines]
-  (parse-consecutive-lines indexed-lines comment-line?
-                           #(str/replace % #"^\s*#\s?" "") :comment))
+  (parse-consecutive-lines
+   indexed-lines comment-line?
+   #(str/replace % #"^\s*#\s?" "") :comment))
 
 (defn parse-fixed-width [indexed-lines]
-  (parse-consecutive-lines indexed-lines fixed-width-line?
-                           #(second (re-matches fixed-width-pattern %)) :fixed-width))
+  (parse-consecutive-lines
+   indexed-lines fixed-width-line?
+   #(second (re-matches fixed-width-pattern %)) :fixed-width))
 
 (defn parse-footnote-definition [indexed-lines]
   (let [[{:keys [line num]} & more] indexed-lines]
@@ -413,7 +425,8 @@
              full-content [content]]
         (if (or (empty? remaining)
                 (not (re-matches #"^\s+\S.*$" line)))
-          [(make-node :footnote-def :label label :content (str/join "\n" full-content) :line num)
+          [(make-node :footnote-def :label label
+                      :content (str/join "\n" full-content) :line num)
            remaining]
           (recur more2 (conj full-content (str/trim line))))))))
 
@@ -423,7 +436,8 @@
            content []]
       (if (empty? remaining)
         (when (seq content)
-          [(make-node :paragraph :content (str/join "\n" content) :line start-line-num) []])
+          [(make-node :paragraph :content (str/join "\n" content)
+                      :line start-line-num) []])
         (if (or (str/blank? line)
                 (headline? line)
                 (list-item? line)
@@ -434,7 +448,8 @@
                 (fixed-width-line? line)
                 (footnote-def? line))
           (when (seq content)
-            [(make-node :paragraph :content (str/join "\n" content) :line start-line-num) remaining])
+            [(make-node :paragraph :content (str/join "\n" content)
+                        :line start-line-num) remaining])
           (recur more (conj content line)))))))
 
 (defn parse-content [indexed-lines path]
@@ -451,7 +466,8 @@
 
         (re-matches property-drawer-start-pattern line)
         (let [[_ properties rest-lines] (parse-property-drawer remaining)
-              drawer-node (make-node :property-drawer :properties properties :line (:num (first remaining)))]
+              drawer-node (make-node :property-drawer :properties properties
+                                     :line (:num (first remaining)))]
           (recur rest-lines (conj nodes drawer-node)))
 
         (comment-line? line)
@@ -564,12 +580,14 @@
      :section
      (let [{:keys [section-title-pattern section-id-pattern]} opts
            direct-match (section-matches? node opts)
-           ancestor-title-ok (or (nil? section-title-pattern)
-                                 (some #(when-let [t (:title %)] (re-find section-title-pattern t)) ancestors))
-           ancestor-id-ok (or (nil? section-id-pattern)
-                              (some #(or (when-let [id (get-in % [:properties :id])] (re-find section-id-pattern id))
-                                         (when-let [cid (get-in % [:properties :custom_id])] (re-find section-id-pattern cid)))
-                                    ancestors))
+           ancestor-title-ok
+           (or (nil? section-title-pattern)
+               (some #(when-let [t (:title %)] (re-find section-title-pattern t)) ancestors))
+           ancestor-id-ok
+           (or (nil? section-id-pattern)
+               (some #(or (when-let [id (get-in % [:properties :id])] (re-find section-id-pattern id))
+                          (when-let [cid (get-in % [:properties :custom_id])] (re-find section-id-pattern cid)))
+                     ancestors))
            passes-filters (and direct-match ancestor-title-ok ancestor-id-ok)
            filtered-children (keep #(filter-ast-node % opts (conj ancestors node)) (:children node))]
        (cond
@@ -582,23 +600,22 @@
   (if (every? nil? (vals opts)) ast (filter-ast-node ast opts)))
 
 ;; AST Content Rendering
-(declare render-content-in-node)
-
 (defn render-content-in-node [node render-format]
   (let [fmt (get-text-formatter render-format)
-        render-children #(mapv (fn [c] (render-content-in-node c render-format)) %)]
-    (case (:type node)
-      :document (-> node (update :title #(when % (fmt %))) (update :children render-children))
-      :section (-> node (update :title fmt) (update :children render-children))
-      :paragraph (update node :content fmt)
-      :list (update node :items #(mapv (fn [i] (render-content-in-node i render-format)) %))
-      :list-item (-> node (update :content fmt) (update :children render-children))
-      :table (update node :rows #(mapv (fn [row] (mapv fmt row)) %))
-      :quote-block (update node :content #(->> (str/split-lines %) (map fmt) (str/join "\n")))
-      :footnote-def (update node :content fmt)
-      :block (if (#{:src :example :export} (:block-type node)) node
-               (update node :content #(->> (str/split-lines %) (map fmt) (str/join "\n"))))
-      node)))
+        render-children #(mapv (fn [c] (render-content-in-node c render-format)) %)
+        result (case (:type node)
+                 :document (-> node (update :title #(when % (fmt %))) (update :children render-children))
+                 :section (-> node (update :title fmt) (update :children render-children))
+                 :paragraph (update node :content fmt)
+                 :list (update node :items #(mapv (fn [i] (render-content-in-node i render-format)) %))
+                 :list-item (-> node (update :content fmt) (update :children render-children))
+                 :table (update node :rows #(mapv (fn [row] (mapv fmt row)) %))
+                 :quote-block (update node :content #(->> (str/split-lines %) (map fmt) (str/join "\n")))
+                 :footnote-def (update node :content fmt)
+                 :block (if (#{:src :example :export} (:block-type node)) node
+                            (update node :content #(->> (str/split-lines %) (map fmt) (str/join "\n"))))
+                 node)]
+    (into {} (remove (fn [[_ v]] (empty-value? v)) result))))
 
 (defn render-ast-content [ast render-format] (render-content-in-node ast render-format))
 
@@ -620,16 +637,17 @@
     (if remove-blanks? (vec (remove content-blank? cleaned)) cleaned)))
 
 (defn clean-node [node]
-  (-> (case (:type node)
-        :document (-> node (update :title #(when % (str/trim %))) (update :children #(clean-children % true)))
-        :section (-> node (update :title str/trim) (update :properties clean-properties) (update :children #(clean-children % true)))
-        :list-item (-> node (update :content #(when % (str/trim %))) (update :children #(clean-children % false)))
-        :list (update node :items #(mapv clean-node %))
-        :table (update node :rows #(mapv (fn [row] (mapv str/trim row)) %))
-        :property-drawer (update node :properties clean-properties)
-        (:paragraph :quote-block :comment :footnote-def :block) (update node :content #(when % (str/trim %)))
-        node)
-      (dissoc :line)))
+  (let [cleaned
+        (case (:type node)
+          :document (-> node (update :title #(when % (str/trim %))) (update :children #(clean-children % true)))
+          :section (-> node (update :title str/trim) (update :properties clean-properties) (update :children #(clean-children % true)))
+          :list-item (-> node (update :content #(when % (str/trim %))) (update :children #(clean-children % false)))
+          :list (update node :items #(mapv clean-node %))
+          :table (update node :rows #(mapv (fn [row] (mapv str/trim row)) %))
+          :property-drawer (update node :properties clean-properties)
+          (:paragraph :quote-block :comment :footnote-def :block) (update node :content #(when % (str/trim %)))
+          node)]
+    (into {} (remove (fn [[k v]] (or (= k :line) (empty-value? v))) cleaned))))
 
 (defn clean-ast [ast] (clean-node ast))
 
@@ -679,6 +697,14 @@ li > p { margin-top: 0.5em; }
           (str/join "\n" (map format-row formatted-rows))))))
 
 (declare render-node)
+
+(defn render-properties-org
+  "Render properties as org :PROPERTIES: drawer."
+  [properties]
+  (when (seq properties)
+    (str ":PROPERTIES:\n"
+         (str/join "\n" (map (fn [[k v]] (str ":" (str/upper-case (name k)) ": " v)) properties))
+         "\n:END:")))
 
 (defn render-list-item [item index ordered level fmt]
   (let [indent (apply str (repeat (* level list-indent-width) " "))
@@ -737,11 +763,7 @@ li > p { margin-top: 0.5em; }
                     todo-str (when (:todo node) (str (name (:todo node)) " "))
                     priority-str (when (:priority node) (str "[#" (:priority node) "] "))
                     tags-str (when (seq (:tags node)) (str " :" (str/join ":" (:tags node)) ":"))
-                    props-str (when (seq (:properties node))
-                                (str ":PROPERTIES:\n"
-                                     (str/join "\n" (map (fn [[k v]] (str ":" (str/upper-case (name k)) ": " v))
-                                                         (:properties node)))
-                                     "\n:END:"))
+                    props-str (render-properties-org (:properties node))
                     children-str (render-children (:children node))]
                 (str stars " " todo-str priority-str (:title node) tags-str
                      (when props-str (str "\n" props-str))
@@ -825,13 +847,7 @@ li > p { margin-top: 0.5em; }
          (str/join "\n" (map #(str "> " (format-text-markdown %)) (str/split-lines (:content node)))))
 
        :property-drawer
-       (if (= fmt :org)
-         (when (seq (:properties node))
-           (str ":PROPERTIES:\n"
-                (str/join "\n" (map (fn [[k v]] (str ":" (str/upper-case (name k)) ": " v))
-                                    (:properties node)))
-                "\n:END:"))
-         "")
+       (if (= fmt :org) (render-properties-org (:properties node)) "")
 
        :comment
        (case fmt
