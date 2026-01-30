@@ -31,10 +31,15 @@
       (and (coll? v) (empty? v))
       (and (string? v) (str/blank? v))))
 
+(defn remove-empty-vals
+  "Remove entries with empty values from a map."
+  [m]
+  (into {} (remove (comp empty-value? val) m)))
+
 (defn make-node
   "Create an AST node, filtering out empty values."
   [type & {:as fields}]
-  (into {:type type} (remove (fn [[_ v]] (empty-value? v)) fields)))
+  (assoc (remove-empty-vals fields) :type type))
 
 ;; Regex Patterns
 (def headline-full-pattern #"^(\*+)\s+(?:(TODO|DONE)\s+)?(?:\[#([A-Z])\]\s+)?(.+?)(?:\s+(:[:\w]+:))?\s*$")
@@ -200,6 +205,13 @@
 
 (defn- upper-name [k] (str/upper-case (name k)))
 
+(defn- prefix-lines
+  "Prefix each line of content with the given string."
+  [prefix content]
+  (->> (str/split-lines content)
+       (map #(str prefix %))
+       (str/join "\n")))
+
 (def image-extensions #{"png" "jpg" "jpeg" "gif" "svg" "webp" "bmp" "ico" "tiff" "tif"})
 
 (def image-mime-types
@@ -247,10 +259,10 @@
 (defn image-to-data-uri
   "Convert a local image file to a data URI, or nil if not possible."
   [filepath]
-  (when-let [ext (get-file-extension filepath)]
-    (when-let [mime-type (get image-mime-types ext)]
-      (when-let [base64-data (file-to-base64 filepath)]
-        (str "data:" mime-type ";base64," base64-data)))))
+  (some-> (get-file-extension filepath)
+          image-mime-types
+          (as-> mime (when-let [b64 (file-to-base64 filepath)]
+                       (str "data:" mime ";base64," b64)))))
 
 (defn format-link [fmt [_ url desc]]
   (let [parsed (parse-link url)
@@ -600,6 +612,12 @@
                         :line start-line-num) remaining])
           (recur more (conj content line)))))))
 
+(defn- try-parse
+  "Try a parser; return [rest-lines updated-nodes] or nil if parser returned nil."
+  [parser remaining nodes]
+  (when-let [[node rest-lines] (parser remaining)]
+    [rest-lines (conj nodes node)]))
+
 (defn parse-content [indexed-lines]
   (loop [[{:keys [line]} & more :as remaining] indexed-lines
          nodes []]
@@ -619,43 +637,44 @@
           (recur rest-lines (conj nodes drawer-node)))
 
         (comment-line? line)
-        (if-let [[comment-node rest-lines] (parse-comment remaining)]
-          (recur rest-lines (conj nodes comment-node))
-          (recur more nodes))
+        (let [[rest-lines nodes'] (or (try-parse parse-comment remaining nodes)
+                                      [more nodes])]
+          (recur rest-lines nodes'))
 
         (fixed-width-line? line)
-        (if-let [[fixed-width-node rest-lines] (parse-fixed-width remaining)]
-          (recur rest-lines (conj nodes fixed-width-node))
-          (recur more nodes))
+        (let [[rest-lines nodes'] (or (try-parse parse-fixed-width remaining nodes)
+                                      [more nodes])]
+          (recur rest-lines nodes'))
 
         (html-line? line)
-        (if-let [[html-node rest-lines] (parse-html-lines remaining)]
-          (recur rest-lines (conj nodes html-node))
-          (recur more nodes))
+        (let [[rest-lines nodes'] (or (try-parse parse-html-lines remaining nodes)
+                                      [more nodes])]
+          (recur rest-lines nodes'))
 
         (latex-line? line)
-        (if-let [[latex-node rest-lines] (parse-latex-lines remaining)]
-          (recur rest-lines (conj nodes latex-node))
-          (recur more nodes))
+        (let [[rest-lines nodes'] (or (try-parse parse-latex-lines remaining nodes)
+                                      [more nodes])]
+          (recur rest-lines nodes'))
 
         (footnote-def? line)
-        (if-let [[footnote-node rest-lines] (parse-footnote-definition remaining)]
-          (recur rest-lines (conj nodes footnote-node))
-          (recur more nodes))
+        (let [[rest-lines nodes'] (or (try-parse parse-footnote-definition remaining nodes)
+                                      [more nodes])]
+          (recur rest-lines nodes'))
 
         (list-item? line)
-        (let [[list-node rest-lines] (process-list remaining)]
-          (recur rest-lines (if list-node (conj nodes list-node) nodes)))
+        (let [[rest-lines nodes'] (or (try-parse process-list remaining nodes)
+                                      [more nodes])]
+          (recur rest-lines nodes'))
 
         (table-line? line)
-        (let [[table rest-lines] (parse-table remaining)]
-          (recur rest-lines (conj nodes table)))
+        (let [[rest-lines nodes'] (or (try-parse parse-table remaining nodes)
+                                      [more nodes])]
+          (recur rest-lines nodes'))
 
         (re-matches generic-block-begin-pattern line)
-        (let [[block rest-lines] (parse-block remaining)]
-          (if block
-            (recur rest-lines (conj nodes block))
-            (recur more nodes)))
+        (let [[rest-lines nodes'] (or (try-parse parse-block remaining nodes)
+                                      [more nodes])]
+          (recur rest-lines nodes'))
 
         :else
         (if-let [[paragraph rest-lines] (parse-paragraph remaining)]
@@ -773,7 +792,7 @@
                  :block (if (#{:src :example :export} (:block-type node)) node
                             (update node :content #(->> (str/split-lines %) (map fmt) (str/join "\n"))))
                  node)]
-    (into {} (remove (fn [[_ v]] (empty-value? v)) result))))
+    (remove-empty-vals result)))
 
 (defn render-ast-content [ast render-format] (render-content-in-node ast render-format))
 
@@ -805,7 +824,7 @@
           :property-drawer (update node :properties clean-properties)
           (:paragraph :quote-block :comment :footnote-def :block :html-line :latex-line) (update node :content #(when % (str/trim %)))
           node)]
-    (into {} (remove (fn [[k v]] (or (= k :line) (empty-value? v))) cleaned))))
+    (remove-empty-vals (dissoc cleaned :line))))
 
 (defn clean-ast [ast] (clean-node ast))
 
@@ -1012,13 +1031,13 @@ li > p { margin-top: 0.5em; }
        :comment
        (case fmt
          :html (str "<!-- " (escape-html (:content node)) " -->")
-         :org (str/join "\n" (map #(str "# " %) (str/split-lines (:content node))))
+         :org (prefix-lines "# " (:content node))
          (str "<!-- " (:content node) " -->"))
 
        :fixed-width
        (case fmt
          :html (str "<pre>" (escape-html (:content node)) "</pre>")
-         :org (str/join "\n" (map #(str ": " %) (str/split-lines (:content node))))
+         :org (prefix-lines ": " (:content node))
          (str "```\n" (:content node) "\n```"))
 
        :footnote-def
@@ -1059,12 +1078,12 @@ li > p { margin-top: 0.5em; }
        :html-line
        (case fmt
          :html (str "<p>" (:content node) "</p>")
-         :org (str/join "\n" (map #(str "#+html: " %) (str/split-lines (:content node))))
+         :org (prefix-lines "#+html: " (:content node))
          "") ;; markdown: remove
 
        :latex-line
        (case fmt
-         :org (str/join "\n" (map #(str "#+latex: " %) (str/split-lines (:content node))))
+         :org (prefix-lines "#+latex: " (:content node))
          "") ;; html and markdown: remove
 
        ;; Default case for warnings or unknown types
@@ -1109,23 +1128,31 @@ li > p { margin-top: 0.5em; }
              "" "Usage: org-ast.clj [options] <org-file>"
              "" "Options:" summary]))
 
+(defn- exit-error
+  "Print error message to stderr and exit with code 1."
+  ([msg] (exit-error msg nil))
+  ([msg summary]
+   (binding [*out* *err*]
+     (println "Error:" msg)
+     (when summary (println (usage summary))))
+   (System/exit 1)))
+
+(defn- exit-ok
+  "Print message to stdout and exit with code 0."
+  ([] (System/exit 0))
+  ([msg] (println msg) (System/exit 0)))
+
 (defn -main [& args]
   (let [{:keys [options arguments errors summary]} (cli/parse-opts args cli-options)]
     (cond
       (:help options)
-      (do (println (usage summary)) (System/exit 0))
+      (exit-ok (usage summary))
 
       errors
-      (do (binding [*out* *err*]
-            (println "Error:" (str/join "; " errors))
-            (println (usage summary)))
-          (System/exit 1))
+      (exit-error (str/join "; " errors) summary)
 
       (not= (count arguments) 1)
-      (do (binding [*out* *err*]
-            (println "Error: Expected one argument (org-file or '-')")
-            (println (usage summary)))
-          (System/exit 1))
+      (exit-error "Expected one argument (org-file or '-')" summary)
 
       :else
       (let [file-path (first arguments)
@@ -1133,9 +1160,7 @@ li > p { margin-top: 0.5em; }
                           (slurp *in*)
                           (try (slurp file-path)
                                (catch java.io.FileNotFoundException _
-                                 (binding [*out* *err*]
-                                   (println (str "Error: File not found - " file-path)))
-                                 (System/exit 1))))]
+                                 (exit-error (str "File not found - " file-path)))))]
         (try
           (let [unwrap? (not (:no-unwrap options))
                 ast (parse-org org-content {:unwrap? unwrap?})
@@ -1174,9 +1199,7 @@ li > p { margin-top: 0.5em; }
                   "yaml" (println (format-ast-as-yaml rendered-ast)))))
             (System/exit 0))
           (catch clojure.lang.ExceptionInfo e
-            (binding [*out* *err*]
-              (println "Parse error:" (.getMessage e)))
-            (System/exit 1))
+            (exit-error (str "Parse error: " (.getMessage e))))
           (catch Exception e
             (binding [*out* *err*]
               (println "Error:" (.getMessage e))
