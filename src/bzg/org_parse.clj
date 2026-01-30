@@ -145,26 +145,26 @@
 
 (defn protect-patterns [text patterns]
   (let [counter     (atom 0)
-        all-matches (atom {})]
-    (let [protected
-          (reduce
-           (fn [t [pattern prefix]]
-             (let [matches (re-seq pattern t)]
-               (reduce
-                (fn [s m]
-                  (let [full (if (string? m) m (first m))
-                        ph   (str prefix (swap! counter inc))]
-                    (swap! all-matches assoc ph full)
-                    (str/replace s full ph)))
-                t
-                matches)))
-           text
-           patterns)]
-      [protected
-       (fn [t]
-         (reduce (fn [s [ph orig]] (str/replace s ph orig))
-                 t
-                 @all-matches))])))
+        all-matches (atom {})
+        protected
+        (reduce
+         (fn [t [pattern prefix]]
+           (let [matches (re-seq pattern t)]
+             (reduce
+              (fn [s m]
+                (let [full (if (string? m) m (first m))
+                      ph   (str prefix (swap! counter inc))]
+                  (swap! all-matches assoc ph full)
+                  (str/replace s full ph)))
+              t
+              matches)))
+         text
+         patterns)]
+    [protected
+     (fn [t]
+       (reduce (fn [s [ph orig]] (str/replace s ph orig))
+               t
+               @all-matches))]))
 
 ;; Parsing Helpers
 (defn parse-footnote-def [line]
@@ -188,9 +188,13 @@
 
 (defn escape-html [text]
   (-> text
-      (str/replace #"&" "&amp;")
-      (str/replace #"<" "&lt;")
-      (str/replace #">" "&gt;")))
+      (str/replace "&" "&amp;")
+      (str/replace "<" "&lt;")
+      (str/replace ">" "&gt;")))
+
+(defn- non-blank? [s] (and s (not (str/blank? s))))
+
+(defn- upper-name [k] (str/upper-case (name k)))
 
 (defn format-link [fmt [_ url desc]]
   (let [parsed (parse-link url)
@@ -452,7 +456,7 @@
                         :line start-line-num) remaining])
           (recur more (conj content line)))))))
 
-(defn parse-content [indexed-lines path]
+(defn parse-content [indexed-lines]
   (loop [[{:keys [line]} & more :as remaining] indexed-lines
          nodes []]
     (if (empty? remaining)
@@ -525,7 +529,7 @@
              [sections remaining]
              (let [new-path-stack                       (update-path-stack path-stack level title)
                    [_ properties rest-after-props]      (parse-property-drawer more)
-                   [content rest-after-content]         (parse-content rest-after-props new-path-stack)
+                   [content rest-after-content]         (parse-content rest-after-props)
                    [subsections rest-after-subsections] (parse-sections rest-after-content new-path-stack level)
                    new-section (make-node :section
                                           :level level
@@ -549,7 +553,7 @@
            indexed-lines (index-lines lines)
            [meta rest-after-meta] (parse-metadata indexed-lines)
            title (get meta :title "Untitled Document")
-           [top-level-content rest-after-content] (parse-content rest-after-meta [])
+           [top-level-content rest-after-content] (parse-content rest-after-meta)
            [sections _] (parse-sections rest-after-content [])
            errors @*parse-errors*
            doc (make-node :document
@@ -703,7 +707,7 @@ li > p { margin-top: 0.5em; }
   [properties]
   (when (seq properties)
     (str ":PROPERTIES:\n"
-         (str/join "\n" (map (fn [[k v]] (str ":" (str/upper-case (name k)) ": " v)) properties))
+         (str/join "\n" (map (fn [[k v]] (str ":" (upper-name k) ": " v)) properties))
          "\n:END:")))
 
 (defn render-list-item [item index ordered level fmt]
@@ -734,8 +738,8 @@ li > p { margin-top: 0.5em; }
                                                  (let [v (get meta k)]
                                                    (when (and v (not (str/blank? (str v))))
                                                      (if (vector? v)
-                                                       (str/join "\n" (map #(str "#+" (str/upper-case (name k)) ": " %) v))
-                                                       (str "#+" (str/upper-case (name k)) ": " v)))))
+                                                       (str/join "\n" (map #(str "#+" (upper-name k) ": " %) v))
+                                                       (str "#+" (upper-name k) ": " v)))))
                                                (:_order meta)))
                                :else nil)]
                 (str (when (seq meta-str) (str meta-str "\n\n"))
@@ -805,18 +809,19 @@ li > p { margin-top: 0.5em; }
        :table
        (if (= fmt :html)
          (let [rows (:rows node)
-               has-header (:has-header node)]
+               has-header (:has-header node)
+               cell (fn [tag content] (str "<" tag ">" (format-text-html content) "</" tag ">"))]
            (if (empty? rows) ""
                (str "<table>\n"
                     (when has-header
                       (str "  <thead>\n    <tr>\n      "
-                           (str/join "" (map #(str "<th>" (format-text-html %) "</th>") (first rows)))
+                           (str/join "" (map #(cell "th" %) (first rows)))
                            "\n    </tr>\n  </thead>\n"))
                     "  <tbody>\n"
                     (str/join "\n"
                               (map (fn [row]
                                      (str "    <tr>\n      "
-                                          (str/join "" (map #(str "<td>" (format-text-html %) "</td>") row))
+                                          (str/join "" (map #(cell "td" %) row))
                                           "\n    </tr>"))
                                    (if has-header (rest rows) rows)))
                     "\n  </tbody>\n</table>")))
@@ -825,14 +830,14 @@ li > p { margin-top: 0.5em; }
        :src-block
        (case fmt
          :html (str "<pre><code"
-                    (when-let [lang (and (:language node) (not (str/blank? (:language node))))]
-                      (str " class=\"language-" (escape-html lang) "\""))
+                    (when (non-blank? (:language node))
+                      (str " class=\"language-" (escape-html (:language node)) "\""))
                     ">" (escape-html (:content node)) "</code></pre>")
          :org (let [lang (:language node)
                     args (:args node)]
                 (str "#+BEGIN_SRC"
-                     (when (and lang (not (str/blank? lang))) (str " " lang))
-                     (when (and args (not (str/blank? args))) (str " " args))
+                     (when (non-blank? lang) (str " " lang))
+                     (when (non-blank? args) (str " " args))
                      "\n" (:content node) "\n#+END_SRC"))
          (str "```" (or (:language node) "") "\n" (:content node) "\n```"))
 
@@ -863,9 +868,10 @@ li > p { margin-top: 0.5em; }
 
        :footnote-def
        (case fmt
-         :html (str "<div class=\"footnote\" id=\"fn-" (escape-html (:label node)) "\">"
-                    "<sup>" (escape-html (:label node)) "</sup> "
-                    (format-text-html (:content node)) "</div>")
+         :html (let [label (escape-html (:label node))]
+                 (str "<div class=\"footnote\" id=\"fn-" label "\">"
+                      "<sup>" label "</sup> "
+                      (format-text-html (:content node)) "</div>"))
          :org (str "[fn:" (:label node) "] " (:content node))
          (str "[^" (:label node) "]: " (format-text-markdown (:content node))))
 
@@ -880,9 +886,9 @@ li > p { margin-top: 0.5em; }
                    (str "<div class=\"block-" (name block-type) "\">"
                         "<pre>" (escape-html (:content node)) "</pre></div>"))
            :org (let [args (:args node)]
-                  (str "#+BEGIN_" (str/upper-case (name block-type))
-                       (when (and args (not (str/blank? args))) (str " " args))
-                       "\n" (:content node) "\n#+END_" (str/upper-case (name block-type))))
+                  (str "#+BEGIN_" (upper-name block-type)
+                       (when (non-blank? args) (str " " args))
+                       "\n" (:content node) "\n#+END_" (upper-name block-type)))
            (str "```" (name block-type) "\n" (:content node) "\n```")))
 
        ;; Default case for warnings or unknown types
