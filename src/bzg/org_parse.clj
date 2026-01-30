@@ -220,27 +220,38 @@
           text replacements))
 
 (defn format-text-markdown [text]
-  (let [[protected restore] (protect-patterns text [[#"\[[^\]]+\]\([^)]+\)" "MD-LINK-"]
+  (let [;; First, protect existing markdown links and code
+        [protected restore] (protect-patterns text [[#"\[[^\]]+\]\([^)]+\)" "MD-LINK-"]
                                                     [#"`[^`]+`" "MD-CODE-"]])
-        formatted
-        (-> protected
-            (str/replace link-with-desc-pattern #(format-link :md %))
-            (str/replace link-without-desc-pattern #(format-link :md [% (second %) nil]))
-            (apply-format-patterns md-format-replacements)
-            (str/replace footnote-ref-pattern "[^$1]"))]
-    (restore formatted)))
+        ;; Convert org links to markdown, then protect them before applying emphasis
+        with-links (-> protected
+                       (str/replace link-with-desc-pattern #(format-link :md %))
+                       (str/replace link-without-desc-pattern #(format-link :md [% (second %) nil])))
+        ;; Protect the newly created markdown links from emphasis processing
+        [link-protected link-restore] (protect-patterns with-links [[#"\[[^\]]+\]\([^)]+\)" "ORG-LINK-"]])
+        ;; Now apply emphasis patterns safely
+        formatted (-> link-protected
+                      (apply-format-patterns md-format-replacements)
+                      (str/replace footnote-ref-pattern "[^$1]"))]
+    (restore (link-restore formatted))))
 
 (defn format-text-html [text]
-  (-> text
-      (str/replace (:bold format-patterns) "<strong>$1</strong>")
-      (str/replace (:italic format-patterns) "<em>$1</em>")
-      (str/replace (:underline format-patterns) "<u>$1</u>")
-      (str/replace (:strike format-patterns) "<del>$1</del>")
-      (str/replace (:code format-patterns) #(str "<code>" (escape-html (second %)) "</code>"))
-      (str/replace (:verbatim format-patterns) #(str "<code>" (escape-html (second %)) "</code>"))
-      (str/replace link-with-desc-pattern #(format-link :html %))
-      (str/replace link-without-desc-pattern #(format-link :html [% (second %) nil]))
-      (str/replace footnote-ref-pattern "<sup><a href=\"#fn-$1\">$1</a></sup>")))
+  (let [;; First convert org links to HTML and protect them
+        with-links (-> text
+                       (str/replace link-with-desc-pattern #(format-link :html %))
+                       (str/replace link-without-desc-pattern #(format-link :html [% (second %) nil])))
+        ;; Protect the HTML links from emphasis processing
+        [protected restore] (protect-patterns with-links [[#"<a\s[^>]*>[^<]*</a>" "HTML-LINK-"]])
+        ;; Now apply emphasis patterns safely
+        formatted (-> protected
+                      (str/replace (:bold format-patterns) "<strong>$1</strong>")
+                      (str/replace (:italic format-patterns) "<em>$1</em>")
+                      (str/replace (:underline format-patterns) "<u>$1</u>")
+                      (str/replace (:strike format-patterns) "<del>$1</del>")
+                      (str/replace (:code format-patterns) #(str "<code>" (escape-html (second %)) "</code>"))
+                      (str/replace (:verbatim format-patterns) #(str "<code>" (escape-html (second %)) "</code>"))
+                      (str/replace footnote-ref-pattern "<sup><a href=\"#fn-$1\">$1</a></sup>"))]
+    (restore formatted)))
 
 (defn get-text-formatter [fmt]
   (case fmt :md format-text-markdown :html format-text-html identity))
