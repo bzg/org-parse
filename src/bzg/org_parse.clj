@@ -200,16 +200,133 @@
 
 (defn- upper-name [k] (str/upper-case (name k)))
 
+(def image-extensions #{"png" "jpg" "jpeg" "gif" "svg" "webp" "bmp" "ico" "tiff" "tif"})
+
+(def image-mime-types
+  {"png"  "image/png"
+   "jpg"  "image/jpeg"
+   "jpeg" "image/jpeg"
+   "gif"  "image/gif"
+   "svg"  "image/svg+xml"
+   "webp" "image/webp"
+   "bmp"  "image/bmp"
+   "ico"  "image/x-icon"
+   "tiff" "image/tiff"
+   "tif"  "image/tiff"})
+
+(defn get-file-extension
+  "Extract lowercase file extension from a path or URL."
+  [path]
+  (when path
+    (let [clean-path (first (str/split (str/lower-case path) #"[?#]"))]
+      (last (str/split clean-path #"\.")))))
+
+(defn image-url?
+  "Check if a URL points to an image based on file extension."
+  [url]
+  (when url
+    (contains? image-extensions (get-file-extension url))))
+
+(defn remote-url?
+  "Check if URL is a remote HTTP/HTTPS URL."
+  [url]
+  (when url
+    (boolean (re-find #"^https?://" url))))
+
+(defn file-to-base64
+  "Read a file and return its base64-encoded content, or nil if file doesn't exist."
+  [filepath]
+  (try
+    (let [file (java.io.File. filepath)]
+      (when (.exists file)
+        (let [bytes (java.nio.file.Files/readAllBytes (.toPath file))
+              encoder (java.util.Base64/getEncoder)]
+          (.encodeToString encoder bytes))))
+    (catch Exception _ nil)))
+
+(defn image-to-data-uri
+  "Convert a local image file to a data URI, or nil if not possible."
+  [filepath]
+  (when-let [ext (get-file-extension filepath)]
+    (when-let [mime-type (get image-mime-types ext)]
+      (when-let [base64-data (file-to-base64 filepath)]
+        (str "data:" mime-type ";base64," base64-data)))))
+
 (defn format-link [fmt [_ url desc]]
   (let [parsed (parse-link url)
-        href (case (:type parsed)
-               :file (:target parsed)
-               :id (str "#" (:target parsed))
-               :mailto (str "mailto:" (:target parsed))
-               (if (= fmt :html) (escape-html url) url))]
-    (if (= fmt :md)
-      (str "[" (or desc url) "](" href ")")
-      (str "<a href=\"" href "\">" (or desc (escape-html url)) "</a>"))))
+        link-type (:type parsed)
+        target (:target parsed)
+        ;; For file: links, target is the path; for http(s), url is the full URL
+        actual-url (if (#{:http :https} link-type) url target)
+        is-local-file (= link-type :file)
+        is-remote (#{:http :https} link-type)
+        url-is-image (image-url? actual-url)
+        desc-is-image (and desc (or (image-url? desc) (remote-url? desc)))]
+    (cond
+      ;; Local file images: convert to base64 data URI
+      (and is-local-file url-is-image)
+      (if-let [data-uri (image-to-data-uri target)]
+        (cond
+          (= fmt :html)
+          (if desc-is-image
+            ;; Description is also an image: clickable image (but desc would need to be resolved too)
+            (str "<a href=\"" data-uri "\"><img src=\"" (escape-html desc) "\" alt=\"" (escape-html desc) "\"></a>")
+            ;; No description or text description: inline image
+            (str "<img src=\"" data-uri "\" alt=\"" (escape-html (or desc target)) "\">"))
+          (= fmt :md)
+          (str "![" (or desc target) "](" data-uri ")")
+          :else "")
+        ;; File not found or error: return empty string
+        "")
+
+      ;; HTML format
+      (= fmt :html)
+      (cond
+        ;; Remote image URL without description: inline image
+        (and is-remote url-is-image (nil? desc))
+        (str "<img src=\"" (escape-html url) "\" alt=\"" (escape-html url) "\">")
+
+        ;; Remote URL with description that is an image URL: clickable image button
+        (and is-remote desc-is-image)
+        (str "<a href=\"" (escape-html url) "\"><img src=\"" (escape-html desc) "\" alt=\"" (escape-html desc) "\"></a>")
+
+        ;; Default: regular link
+        :else
+        (let [href (case link-type
+                     :file target
+                     :id (str "#" target)
+                     :mailto (str "mailto:" target)
+                     (escape-html url))]
+          (str "<a href=\"" href "\">" (or desc (escape-html url)) "</a>")))
+
+      ;; Markdown format
+      (= fmt :md)
+      (cond
+        ;; Remote image URL without description: inline image
+        (and is-remote url-is-image (nil? desc))
+        (str "![" url "](" url ")")
+
+        ;; Remote URL with description that is an image URL: linked image
+        (and is-remote desc-is-image)
+        (str "[![" desc "](" desc ")](" url ")")
+
+        ;; Default: regular link
+        :else
+        (let [href (case link-type
+                     :file target
+                     :id (str "#" target)
+                     :mailto (str "mailto:" target)
+                     url)]
+          (str "[" (or desc url) "](" href ")")))
+
+      ;; Other formats (org): preserve as-is or default behavior
+      :else
+      (let [href (case link-type
+                   :file target
+                   :id (str "#" target)
+                   :mailto (str "mailto:" target)
+                   url)]
+        (str "[" (or desc url) "](" href ")")))))
 
 (def md-format-replacements
   [[:bold "**$1**"]
@@ -699,6 +816,7 @@
 h1, h2, h3, h4, h5, h6 { line-height: 1.2; }
 pre { background-color: #f8f8f8; border: 1px solid #ddd; border-radius: 4px; padding: 1em; overflow-x: auto; }
 code { font-family: monospace; }
+img { max-width: 100%; }
 pre code { background-color: transparent; border: none; padding: 0; }
 blockquote { border-left: 4px solid #eee; margin-left: 0; padding-left: 1em; color: #555; }
 table { border-collapse: collapse; width: 100%; margin-bottom: 1em; }
