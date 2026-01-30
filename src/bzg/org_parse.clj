@@ -48,6 +48,8 @@
 (def generic-block-begin-pattern #"(?i)^\s*#\+BEGIN_(\w+)(?:\s+(.*))?$")
 (def metadata-pattern #"^\s*#\+(\w+):\s*(.*)$")
 (def comment-pattern #"^\s*#(?!\+).*$")
+(def html-line-pattern #"(?i)^\s*#\+html:\s*(.*)$")
+(def latex-line-pattern #"(?i)^\s*#\+latex:\s*(.*)$")
 (def block-begin-pattern #"(?i)^\s*#\+BEGIN.*$")
 (def block-end-pattern #"(?i)^\s*#\+END.*$")
 (def continuation-pattern #"^\s+\S.*$")
@@ -69,6 +71,8 @@
 (defn unordered-list-item? [line] (re-matches #"^\s*[-+*]\s+.*$" line))
 (defn ordered-list-item? [line] (re-matches #"^\s*\d+[.)]\s+.*$" line))
 (defn footnote-def? [line] (re-matches footnote-def-pattern line))
+(defn html-line? [line] (re-matches html-line-pattern line))
+(defn latex-line? [line] (re-matches latex-line-pattern line))
 (defn property-line? [line]
   (or (re-matches property-drawer-start-pattern line)
       (re-matches property-drawer-end-pattern line)
@@ -433,6 +437,16 @@
    indexed-lines fixed-width-line?
    #(second (re-matches fixed-width-pattern %)) :fixed-width))
 
+(defn parse-html-lines [indexed-lines]
+  (parse-consecutive-lines
+   indexed-lines html-line?
+   #(second (re-matches html-line-pattern %)) :html-line))
+
+(defn parse-latex-lines [indexed-lines]
+  (parse-consecutive-lines
+   indexed-lines latex-line?
+   #(second (re-matches latex-line-pattern %)) :latex-line))
+
 (defn parse-footnote-definition [indexed-lines]
   (let [[{:keys [line num]} & more] indexed-lines]
     (when-let [{:keys [label content]} (parse-footnote-def line)]
@@ -461,7 +475,9 @@
                 (re-matches property-drawer-start-pattern line)
                 (comment-line? line)
                 (fixed-width-line? line)
-                (footnote-def? line))
+                (footnote-def? line)
+                (html-line? line)
+                (latex-line? line))
           (when (seq content)
             [(make-node :paragraph :content (str/join "\n" content)
                         :line start-line-num) remaining])
@@ -493,6 +509,16 @@
         (fixed-width-line? line)
         (if-let [[fixed-width-node rest-lines] (parse-fixed-width remaining)]
           (recur rest-lines (conj nodes fixed-width-node))
+          (recur more nodes))
+
+        (html-line? line)
+        (if-let [[html-node rest-lines] (parse-html-lines remaining)]
+          (recur rest-lines (conj nodes html-node))
+          (recur more nodes))
+
+        (latex-line? line)
+        (if-let [[latex-node rest-lines] (parse-latex-lines remaining)]
+          (recur rest-lines (conj nodes latex-node))
           (recur more nodes))
 
         (footnote-def? line)
@@ -641,7 +667,7 @@
 
 (defn content-blank? [node]
   (case (:type node)
-    (:paragraph :comment :fixed-width :quote-block :src-block :block :footnote-def) (str/blank? (:content node))
+    (:paragraph :comment :fixed-width :quote-block :src-block :block :footnote-def :html-line :latex-line) (str/blank? (:content node))
     :list (empty? (:items node))
     :table (empty? (:rows node))
     false))
@@ -660,7 +686,7 @@
           :list (update node :items #(mapv clean-node %))
           :table (update node :rows #(mapv (fn [row] (mapv str/trim row)) %))
           :property-drawer (update node :properties clean-properties)
-          (:paragraph :quote-block :comment :footnote-def :block) (update node :content #(when % (str/trim %)))
+          (:paragraph :quote-block :comment :footnote-def :block :html-line :latex-line) (update node :content #(when % (str/trim %)))
           node)]
     (into {} (remove (fn [[k v]] (or (= k :line) (empty-value? v))) cleaned))))
 
@@ -887,20 +913,41 @@ li > p { margin-top: 0.5em; }
          (str "[^" (:label node) "]: " (format-text-markdown (:content node))))
 
        :block
-       (let [block-type (:block-type node)]
+       (let [block-type (:block-type node)
+             export-type (:args node)]
          (case fmt
            :html (case block-type
                    :warning (str "<div class=\"warning\">" (format-text-html (:content node)) "</div>")
                    :note (str "<div class=\"note\">" (format-text-html (:content node)) "</div>")
                    :example (str "<pre>" (escape-html (:content node)) "</pre>")
-                   :export (if (= (:args node) "html") (:content node) "")
+                   :export (if (= export-type "html") (:content node) "")
                    (str "<div class=\"block-" (name block-type) "\">"
                         "<pre>" (escape-html (:content node)) "</pre></div>"))
-           :org (let [args (:args node)]
-                  (str "#+BEGIN_" (upper-name block-type)
-                       (when (non-blank? args) (str " " args))
-                       "\n" (:content node) "\n#+END_" (upper-name block-type)))
-           (str "```" (name block-type) "\n" (:content node) "\n```")))
+           :org (case block-type
+                  :export (if (= export-type "org")
+                            (:content node)
+                            (str "#+BEGIN_EXPORT"
+                                 (when (non-blank? export-type) (str " " export-type))
+                                 "\n" (:content node) "\n#+END_EXPORT"))
+                  (let [args (:args node)]
+                    (str "#+BEGIN_" (upper-name block-type)
+                         (when (non-blank? args) (str " " args))
+                         "\n" (:content node) "\n#+END_" (upper-name block-type))))
+           ;; markdown
+           (case block-type
+             :export (if (= export-type "markdown") (:content node) "")
+             (str "```" (name block-type) "\n" (:content node) "\n```"))))
+
+       :html-line
+       (case fmt
+         :html (str "<p>" (:content node) "</p>")
+         :org (str/join "\n" (map #(str "#+html: " %) (str/split-lines (:content node))))
+         "") ;; markdown: remove
+
+       :latex-line
+       (case fmt
+         :org (str/join "\n" (map #(str "#+latex: " %) (str/split-lines (:content node))))
+         "") ;; html and markdown: remove
 
        ;; Default case for warnings or unknown types
        (if (:warning node)
