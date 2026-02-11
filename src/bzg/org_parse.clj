@@ -65,9 +65,27 @@
 (def link-with-desc-pattern #"\[\[([^\]]+)\]\[([^\]]+)\]\]")
 (def link-without-desc-pattern #"\[\[([^\]]+)\]\]")
 (def link-type-pattern #"^(file|id|mailto|http|https|ftp|news|shell|elisp|doi):(.*)$")
-
-;; Affiliated keywords patterns (#+attr_html, #+caption, #+name, etc.)
 (def affiliated-keyword-pattern #"(?i)^\s*#\+(attr_\w+|caption|name|header|results):\s*(.*)$")
+
+(def rendering-keywords
+  #{"title" "author" "date" "subtitle" "email" "language"
+    "html" "latex" "caption" "name" "header" "results"})
+
+(defn rendering-keyword?
+  "Check if a #+keyword line affects rendering.
+   Returns true for known rendering keywords and attr_* patterns."
+  [line]
+  (when-let [[_ kw _] (re-matches metadata-pattern line)]
+    (let [kw-lower (str/lower-case kw)]
+      (or (contains? rendering-keywords kw-lower)
+          (str/starts-with? kw-lower "attr_")))))
+
+(defn ignored-keyword-line?
+  "Check if a line is a #+ keyword that should be ignored (no rendering impact)."
+  [line]
+  (and (re-matches metadata-pattern line)
+       (not (rendering-keyword? line))
+       (not (re-matches block-begin-pattern line))))
 
 ;; Line Type Predicates
 (defn headline? [line] (re-matches headline-pattern line))
@@ -559,6 +577,9 @@
     (when-let [[_ stars title] (re-matches headline-pattern line)]
       {:level (count stars) :title (str/trim title)})))
 
+(def metadata-rendering-keywords
+  #{"title" "author" "date" "subtitle" "email" "language" "description" "keywords"})
+
 (defn parse-metadata [indexed-lines]
   (loop [[{:keys [line] :as l} & more :as remaining] indexed-lines
          meta {} order [] raw []]
@@ -568,16 +589,21 @@
         (re-matches metadata-pattern line)
         (let [[_ key value] (re-matches metadata-pattern line)
               kw       (keyword (str/lower-case key))
-              existing (get meta kw)
-              v        (str/trim value)
-              new-val  (cond
-                         (nil? existing) v
-                         (vector? existing) (conj existing v)
-                         :else [existing v])]
-          (recur more
-                 (assoc meta kw new-val)
-                 (if (some #{kw} order) order (conj order kw))
-                 (conj raw line)))
+              kw-str   (str/lower-case key)]
+          ;; Only keep metadata that affects rendering
+          (if (contains? metadata-rendering-keywords kw-str)
+            (let [existing (get meta kw)
+                  v        (str/trim value)
+                  new-val  (cond
+                             (nil? existing) v
+                             (vector? existing) (conj existing v)
+                             :else [existing v])]
+              (recur more
+                     (assoc meta kw new-val)
+                     (if (some #{kw} order) order (conj order kw))
+                     (conj raw line)))
+            ;; Skip non-rendering metadata lines
+            (recur more meta order raw)))
 
         (str/blank? line)
         (recur more meta order raw)
@@ -821,6 +847,9 @@
         (let [[rest-lines nodes'] (or (try-parse parse-comment remaining nodes)
                                       [more nodes])]
           (recur rest-lines nodes' nil))
+
+        (ignored-keyword-line? line)
+        (recur more nodes pending-affiliated)
 
         (fixed-width-line? line)
         (let [[rest-lines nodes'] (or (try-parse parse-fixed-width remaining nodes)
