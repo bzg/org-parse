@@ -60,7 +60,8 @@
 (def block-end-pattern #"(?i)^\s*#\+END.*$")
 (def continuation-pattern #"^\s+\S.*$")
 (def fixed-width-pattern #"^\s*: (.*)$")
-(def footnote-ref-pattern #"\[fn:([^\]]+)\]")
+(def footnote-ref-pattern #"\[fn:([^\]:]+)\]")
+(def footnote-inline-pattern #"\[fn:([^\]:]*):([^\]]+)\]")
 (def footnote-def-pattern #"^\[fn:([^\]]+)\]\s*(.*)$")
 (def link-with-desc-pattern #"\[\[([^\]]+)\]\[([^\]]+)\]\]")
 (def link-without-desc-pattern #"\[\[([^\]]+)\]\]")
@@ -131,6 +132,132 @@
       (list-item? next-line)
       (and (list-item? current-line)
            (list-item? next-line))))
+
+;; Org entities - maps \name to Unicode/ASCII equivalent
+;; Based on org-entities from Org mode
+(def org-entities
+  {"\\alpha" "α"
+   "\\beta" "β"
+   "\\gamma" "γ"
+   "\\delta" "δ"
+   "\\epsilon" "ε"
+   "\\zeta" "ζ"
+   "\\eta" "η"
+   "\\theta" "θ"
+   "\\iota" "ι"
+   "\\kappa" "κ"
+   "\\lambda" "λ"
+   "\\mu" "μ"
+   "\\nu" "ν"
+   "\\xi" "ξ"
+   "\\pi" "π"
+   "\\rho" "ρ"
+   "\\sigma" "σ"
+   "\\tau" "τ"
+   "\\upsilon" "υ"
+   "\\phi" "φ"
+   "\\chi" "χ"
+   "\\psi" "ψ"
+   "\\omega" "ω"
+   "\\Alpha" "Α"
+   "\\Beta" "Β"
+   "\\Gamma" "Γ"
+   "\\Delta" "Δ"
+   "\\Epsilon" "Ε"
+   "\\Zeta" "Ζ"
+   "\\Eta" "Η"
+   "\\Theta" "Θ"
+   "\\Iota" "Ι"
+   "\\Kappa" "Κ"
+   "\\Lambda" "Λ"
+   "\\Mu" "Μ"
+   "\\Nu" "Ν"
+   "\\Xi" "Ξ"
+   "\\Pi" "Π"
+   "\\Rho" "Ρ"
+   "\\Sigma" "Σ"
+   "\\Tau" "Τ"
+   "\\Upsilon" "Υ"
+   "\\Phi" "Φ"
+   "\\Chi" "Χ"
+   "\\Psi" "Ψ"
+   "\\Omega" "Ω"
+   "\\rarr" "→"
+   "\\larr" "←"
+   "\\uarr" "↑"
+   "\\darr" "↓"
+   "\\harr" "↔"
+   "\\rArr" "⇒"
+   "\\lArr" "⇐"
+   "\\uArr" "⇑"
+   "\\dArr" "⇓"
+   "\\hArr" "⇔"
+   "\\to" "→"
+   "\\gets" "←"
+   "\\pm" "±"
+   "\\times" "×"
+   "\\div" "÷"
+   "\\leq" "≤"
+   "\\geq" "≥"
+   "\\neq" "≠"
+   "\\approx" "≈"
+   "\\infty" "∞"
+   "\\sum" "∑"
+   "\\prod" "∏"
+   "\\int" "∫"
+   "\\partial" "∂"
+   "\\nabla" "∇"
+   "\\sqrt" "√"
+   "\\in" "∈"
+   "\\notin" "∉"
+   "\\subset" "⊂"
+   "\\supset" "⊃"
+   "\\cap" "∩"
+   "\\cup" "∪"
+   "\\emptyset" "∅"
+   "\\forall" "∀"
+   "\\exists" "∃"
+   "\\neg" "¬"
+   "\\land" "∧"
+   "\\lor" "∨"
+   "\\oplus" "⊕"
+   "\\otimes" "⊗"
+   "\\dots" "…"
+   "\\ldots" "…"
+   "\\hellip" "…"
+   "\\mdash" "—"
+   "\\ndash" "–"
+   "\\laquo" "«"
+   "\\raquo" "»"
+   "\\lsquo" "'"
+   "\\rsquo" "'"
+   "\\ldquo" "\""
+   "\\rdquo" "\""
+   "\\deg" "°"
+   "\\pound" "£"
+   "\\euro" "€"
+   "\\yen" "¥"
+   "\\copy" "©"
+   "\\reg" "®"
+   "\\trade" "™"
+   "\\sect" "§"
+   "\\para" "¶"
+   "\\dagger" "†"
+   "\\ddagger" "‡"
+   "\\bull" "•"
+   "\\nbsp{}" "\u00A0"
+   "\\amp" "&"
+   "\\lt" "<"
+   "\\gt" ">"
+   "\\checkmark" "✓"})
+
+(defn replace-entities
+  "Replace Org entities (\\name) with their Unicode equivalents."
+  [text]
+  (reduce (fn [t [entity replacement]]
+            (str/replace t entity replacement))
+          text
+          org-entities))
 
 (defn should-append? [current-line next-line in-block]
   (cond
@@ -204,9 +331,20 @@
     {:label label :content content}))
 
 (defn parse-link [s]
-  (if-let [[_ t target] (re-matches link-type-pattern s)]
-    {:type (keyword t) :target target}
-    {:type :external :target s}))
+  (cond
+    ;; Internal link to heading: [[*Some Heading]]
+    (str/starts-with? s "*")
+    {:type :heading :target (subs s 1)}
+
+    ;; Internal link to custom-id: [[#my-id]]
+    (str/starts-with? s "#")
+    {:type :custom-id :target (subs s 1)}
+
+    ;; Typed link: file:, http:, etc.
+    :else
+    (if-let [[_ t target] (re-matches link-type-pattern s)]
+      {:type (keyword t) :target target}
+      {:type :external :target s})))
 
 ;; Parse Org-style attribute syntax: :key value :key2 "quoted value"
 (defn parse-attr-string
@@ -398,6 +536,15 @@
       (str "<figure>" img-tag "<figcaption>" (escape-html caption) "</figcaption></figure>")
       img-tag)))
 
+(defn heading-to-slug
+  "Convert a heading title to a URL-safe slug for anchor links."
+  [title]
+  (-> title
+      str/lower-case
+      (str/replace #"[^\w\s-]" "")  ; Remove special chars except spaces and hyphens
+      str/trim
+      (str/replace #"\s+" "-")))   ; Replace spaces with hyphens
+
 (defn format-link
   "Format an org link to the specified format.
    Optionally accepts affiliated keywords for enhanced image rendering."
@@ -453,9 +600,15 @@
          (let [href (case link-type
                       :file target
                       :id (str "#" target)
+                      :custom-id (str "#" target)
+                      :heading (str "#" (heading-to-slug target))
                       :mailto (str "mailto:" target)
-                      (escape-html url))]
-           (str "<a href=\"" href "\">" (or desc (escape-html url)) "</a>")))
+                      (escape-html url))
+               display (or desc (case link-type
+                                  :heading target
+                                  :custom-id target
+                                  (escape-html url)))]
+           (str "<a href=\"" href "\">" display "</a>")))
 
        ;; Markdown format
        (= fmt :md)
@@ -473,18 +626,30 @@
          (let [href (case link-type
                       :file target
                       :id (str "#" target)
+                      :custom-id (str "#" target)
+                      :heading (str "#" (heading-to-slug target))
                       :mailto (str "mailto:" target)
-                      url)]
-           (str "[" (or desc url) "](" href ")")))
+                      url)
+               display (or desc (case link-type
+                                  :heading target
+                                  :custom-id target
+                                  url))]
+           (str "[" display "](" href ")")))
 
        ;; Other formats (org): preserve as-is or default behavior
        :else
        (let [href (case link-type
                     :file target
                     :id (str "#" target)
+                    :custom-id (str "#" target)
+                    :heading (str "#" (heading-to-slug target))
                     :mailto (str "mailto:" target)
-                    url)]
-         (str "[" (or desc url) "](" href ")"))))))
+                    url)
+             display (or desc (case link-type
+                                :heading target
+                                :custom-id target
+                                url))]
+         (str "[" display "](" href ")"))))))
 
 (def md-format-replacements
   [[:bold "**$1**"]
@@ -516,6 +681,22 @@
                         (str/replace footnote-ref-pattern "[^$1]"))]
       (restore (link-restore formatted)))))
 
+(defn format-footnote-html
+  "Format a footnote reference or inline footnote to HTML.
+   For [fn:label] -> link to footnote definition with id for back-link
+   For [fn:label:content] or [fn::content] -> inline with tooltip"
+  [match]
+  (let [full (first match)]
+    (if-let [[_ label content] (re-matches footnote-inline-pattern full)]
+      ;; Inline footnote [fn:label:content] or [fn::content]
+      (let [display (if (str/blank? label) "*" label)
+            escaped-content (escape-html content)]
+        (str "<sup><a href=\"#\" title=\"" escaped-content "\" class=\"footnote-inline\">" display "</a></sup>"))
+      ;; Regular footnote reference [fn:label]
+      (if-let [[_ label] (re-matches footnote-ref-pattern full)]
+        (str "<sup id=\"fnref-" label "\"><a href=\"#fn-" label "\" class=\"footnote-ref\">" label "</a></sup>")
+        full))))
+
 (defn format-text-html [text]
   (if (or (nil? text) (str/blank? text))
     ""
@@ -533,7 +714,7 @@
           ;; Protect the HTML links and macros from emphasis processing
           [protected restore] (protect-patterns with-links [[#"<a\s[^>]*>[^<]*</a>" "HTML-LINK-"]
                                                             [#"\{\{\{.+?\}\}\}" "HTML-MACRO-"]])
-          ;; Now apply emphasis patterns safely
+          ;; Now apply emphasis patterns safely, then handle footnotes
           formatted (-> protected
                         (str/replace (:bold format-patterns) "<strong>$1</strong>")
                         (str/replace (:italic format-patterns) "<em>$1</em>")
@@ -541,7 +722,9 @@
                         (str/replace (:strike format-patterns) "<del>$1</del>")
                         (str/replace (:code format-patterns) #(str "<code>" (escape-html (second %)) "</code>"))
                         (str/replace (:verbatim format-patterns) #(str "<code>" (escape-html (second %)) "</code>"))
-                        (str/replace footnote-ref-pattern "<sup><a href=\"#fn-$1\">$1</a></sup>"))]
+                        ;; Handle inline footnotes first (they have :content), then regular refs
+                        (str/replace footnote-inline-pattern format-footnote-html)
+                        (str/replace footnote-ref-pattern format-footnote-html))]
       (restore formatted))))
 
 (defn extract-single-image-link
@@ -1041,7 +1224,9 @@
   ([org-content] (parse-org org-content {}))
   ([org-content {:keys [unwrap?] :or {unwrap? true}}]
    (binding [*parse-errors* (atom [])]
-     (let [processed-content (if unwrap? (unwrap-text org-content) org-content)
+     (let [;; First replace org entities, then optionally unwrap
+           with-entities (replace-entities org-content)
+           processed-content (if unwrap? (unwrap-text with-entities) with-entities)
            lines (str/split-lines processed-content)
            indexed-lines (index-lines lines)
            [meta rest-after-meta] (parse-metadata indexed-lines)
@@ -1170,7 +1355,10 @@ li > p { margin-top: 0.5em; }
 .done { font-weight: bold; color: #0a0; }
 .priority { color: #c60; }
 .tags { color: #666; font-size: 0.9em; }
-.footnote { font-size: 0.9em; }
+.footnotes { margin-top: 2em; padding-top: 1em; border-top: 1px solid #ccc; font-size: 0.9em; }
+.footnote { margin: 0.5em 0; }
+.footnote-ref, .footnote-inline { text-decoration: none; }
+.footnote-inline { cursor: help; border-bottom: 1px dotted #666; }
 .warning { background: #fff3cd; padding: 0.5em; border-left: 4px solid #ffc107; }")
 
 (defn html-template [title content]
@@ -1223,9 +1411,22 @@ li > p { margin-top: 0.5em; }
      (case (:type node)
        :document
        (case fmt
-         :html (html-template (:title node "Untitled Document")
-                              (str (when-let [t (:title node)] (str "<h1>" (format-text-html t) "</h1>\n"))
-                                   (render-children (:children node))))
+         :html (let [content (render-children (:children node))
+                     ;; Collect all footnote definitions from children
+                     footnotes (filter #(= (:type %) :footnote-def) (:children node))
+                     ;; Render content without footnote-defs (they'll be in the aside)
+                     main-content (str (when-let [t (:title node)] (str "<h1>" (format-text-html t) "</h1>\n"))
+                                       (->> (:children node)
+                                            (remove #(= (:type %) :footnote-def))
+                                            (map #(render-node % fmt level))
+                                            (str/join "\n")))
+                     ;; Render footnotes section if any
+                     footnotes-html (when (seq footnotes)
+                                      (str "<aside class=\"footnotes\">\n"
+                                           (str/join "\n" (map #(render-node % fmt level) footnotes))
+                                           "\n</aside>"))]
+                 (html-template (:title node "Untitled Document")
+                                (str main-content (when footnotes-html (str "\n" footnotes-html)))))
          :org (let [meta (:meta node)
                     meta-str (cond
                                (seq (:_raw meta)) (str/join "\n" (:_raw meta))
@@ -1249,6 +1450,9 @@ li > p { margin-top: 0.5em; }
        (case fmt
          :html (let [lvl (min (:level node) max-heading-level)
                      tag (str "h" lvl)
+                     ;; Use custom_id if present, otherwise generate from title
+                     section-id (or (get-in node [:properties :custom_id])
+                                    (heading-to-slug (:title node)))
                      todo-html (when (:todo node)
                                  (str "<span class=\"todo " (str/lower-case (name (:todo node))) "\">"
                                       (name (:todo node)) "</span> "))
@@ -1256,7 +1460,7 @@ li > p { margin-top: 0.5em; }
                                      (str "<span class=\"priority\">[#" (:priority node) "]</span> "))
                      tags-html (when (seq (:tags node))
                                  (str " <span class=\"tags\">:" (str/join ":" (:tags node)) ":</span>"))]
-                 (str "<section>\n<" tag ">"
+                 (str "<section id=\"" section-id "\">\n<" tag ">"
                       todo-html priority-html (format-text-html (:title node)) tags-html
                       "</" tag ">\n"
                       (render-children (:children node)) "\n</section>"))
@@ -1401,7 +1605,7 @@ li > p { margin-top: 0.5em; }
        (case fmt
          :html (let [label (escape-html (:label node))]
                  (str "<div class=\"footnote\" id=\"fn-" label "\">"
-                      "<sup>" label "</sup> "
+                      "<a href=\"#fnref-" label "\" class=\"footnote-backref\"><sup>" label "</sup></a> "
                       (format-text-html (:content node)) "</div>"))
          :org (str "[fn:" (:label node) "] " (:content node))
          (str "[^" (:label node) "]: " (format-text-markdown (:content node))))
