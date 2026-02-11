@@ -513,12 +513,20 @@
     (restore (link-restore formatted))))
 
 (defn format-text-html [text]
-  (let [;; First convert org links to HTML and protect them
-        with-links (-> text
+  (let [;; First protect macros and org links before escaping HTML
+        ;; Macro pattern must come first: {{{name(args)}}} where args can contain anything
+        [protected-content restore-content] (protect-patterns text [[#"\{\{\{.+?\}\}\}" "ORG-MACRO-"]
+                                                                    [link-with-desc-pattern "ORG-LINK-DESC-"]
+                                                                    [link-without-desc-pattern "ORG-LINK-PLAIN-"]])
+        ;; Escape HTML in the text (but not in protected content)
+        escaped (escape-html protected-content)
+        ;; Restore org links and macros, convert links to HTML
+        with-links (-> (restore-content escaped)
                        (str/replace link-with-desc-pattern #(format-link :html %))
                        (str/replace link-without-desc-pattern #(format-link :html [% (second %) nil])))
-        ;; Protect the HTML links from emphasis processing
-        [protected restore] (protect-patterns with-links [[#"<a\s[^>]*>[^<]*</a>" "HTML-LINK-"]])
+        ;; Protect the HTML links and macros from emphasis processing
+        [protected restore] (protect-patterns with-links [[#"<a\s[^>]*>[^<]*</a>" "HTML-LINK-"]
+                                                          [#"\{\{\{.+?\}\}\}" "HTML-MACRO-"]])
         ;; Now apply emphasis patterns safely
         formatted (-> protected
                       (str/replace (:bold format-patterns) "<strong>$1</strong>")
