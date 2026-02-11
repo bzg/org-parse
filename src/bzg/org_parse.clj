@@ -59,7 +59,7 @@
 (def block-begin-pattern #"(?i)^\s*#\+BEGIN.*$")
 (def block-end-pattern #"(?i)^\s*#\+END.*$")
 (def continuation-pattern #"^\s+\S.*$")
-(def fixed-width-pattern #"^:\s(.*)$")
+(def fixed-width-pattern #"^\s*: (.*)$")
 (def footnote-ref-pattern #"\[fn:([^\]]+)\]")
 (def footnote-def-pattern #"^\[fn:([^\]]+)\]\s*(.*)$")
 (def link-with-desc-pattern #"\[\[([^\]]+)\]\[([^\]]+)\]\]")
