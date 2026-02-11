@@ -440,6 +440,11 @@
 
 (defn- upper-name [k] (str/upper-case (name k)))
 
+(defn- repeat-str
+  "Repeat string s n times."
+  [n s]
+  (apply str (repeat n s)))
+
 (defn- prefix-lines
   "Prefix each line of content with the given string."
   [prefix content]
@@ -752,8 +757,13 @@
     ;; Regular paragraph
     (str "<p>" (format-text-html content) "</p>")))
 
-(defn get-text-formatter [fmt]
-  (case fmt :md format-text-markdown :html format-text-html identity))
+(defn format-text
+  "Format text according to output format. For :org, returns text unchanged."
+  [fmt text]
+  (case fmt
+    :html (format-text-html text)
+    :md (format-text-markdown text)
+    text))
 
 (defn flush-item [items current-item]
   (if current-item (conj items current-item) items))
@@ -1283,7 +1293,7 @@
 
 ;; AST Content Rendering
 (defn render-content-in-node [node render-format]
-  (let [fmt (get-text-formatter render-format)
+  (let [fmt #(format-text render-format %)
         render-children #(mapv (fn [c] (render-content-in-node c render-format)) %)
         result (case (:type node)
                  :document (-> node (update :title #(when % (fmt %))) (update :children render-children))
@@ -1359,7 +1369,8 @@ li > p { margin-top: 0.5em; }
 .footnote { margin: 0.5em 0; }
 .footnote-ref, .footnote-inline { text-decoration: none; }
 .footnote-inline { cursor: help; border-bottom: 1px dotted #666; }
-.warning { background: #fff3cd; padding: 0.5em; border-left: 4px solid #ffc107; }")
+.warning { background: #fff3cd; padding: 0.5em; border-left: 4px solid #ffc107; margin: 1em 0; }
+.note { background: #d1ecf1; padding: 0.5em; border-left: 4px solid #17a2b8; margin: 1em 0; }")
 
 (defn html-template [title content]
   (str "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
@@ -1371,15 +1382,15 @@ li > p { margin-top: 0.5em; }
 
 (defn render-table [rows has-header fmt]
   (if (empty? rows) ""
-      (let [format-cell (if (= fmt :md) format-text-markdown identity)
+      (let [format-cell #(format-text fmt %)
             formatted-rows (mapv (fn [row] (mapv format-cell row)) rows)
             col-widths (when (seq formatted-rows)
                          (apply mapv (fn [& cells] (apply max min-table-cell-width (map count cells)))
                                 formatted-rows))
-            pad-cell (fn [cell width] (str cell (apply str (repeat (- width (count cell)) " "))))
+            pad-cell (fn [cell width] (str cell (repeat-str (- width (count cell)) " ")))
             format-row (fn [row]
                          (str "| " (str/join " | " (map-indexed #(pad-cell %2 (nth col-widths %1)) row)) " |"))
-            separator (str "|-" (str/join (if (= fmt :org) "-+-" "-|-") (map #(apply str (repeat % "-")) col-widths)) "-|")]
+            separator (str "|-" (str/join (if (= fmt :org) "-+-" "-|-") (map #(repeat-str % "-") col-widths)) "-|")]
         (if has-header
           (str (format-row (first formatted-rows)) "\n" separator "\n"
                (str/join "\n" (map format-row (rest formatted-rows))))
@@ -1396,9 +1407,11 @@ li > p { margin-top: 0.5em; }
          "\n:END:")))
 
 (defn render-list-item [item index ordered level fmt]
-  (let [indent (apply str (repeat (* level list-indent-width) " "))
+  (let [indent (repeat-str (* level list-indent-width) " ")
         marker (if ordered (str (inc index) ". ") "- ")
-        content (if (= fmt :md) (format-text-markdown (:content item)) (:content item))
+        content (if (:term item)
+                  (str (:term item) " :: " (or (:definition item) ""))
+                  (format-text fmt (:content item)))
         children-str (when (seq (:children item))
                        (str/join "\n" (map #(render-node % fmt (inc level)) (:children item))))]
     (str indent marker content (when children-str (str "\n" children-str)))))
@@ -1443,7 +1456,7 @@ li > p { margin-top: 0.5em; }
                 (str (when (seq meta-str) (str meta-str "\n\n"))
                      (render-children (:children node))))
          ;; default: markdown
-         (let [title (if-let [t (:title node)] (str "# " (format-text-markdown t) "\n\n") "")]
+         (let [title (if-let [t (:title node)] (str "# " (format-text :md t) "\n\n") "")]
            (str title (render-children (:children node)))))
 
        :section
@@ -1464,7 +1477,7 @@ li > p { margin-top: 0.5em; }
                       todo-html priority-html (format-text-html (:title node)) tags-html
                       "</" tag ">\n"
                       (render-children (:children node)) "\n</section>"))
-         :org (let [stars (apply str (repeat (:level node) "*"))
+         :org (let [stars (repeat-str (:level node) "*")
                     todo-str (when (:todo node) (str (name (:todo node)) " "))
                     priority-str (when (:priority node) (str "[#" (:priority node) "] "))
                     tags-str (when (seq (:tags node)) (str " :" (str/join ":" (:tags node)) ":"))
@@ -1477,9 +1490,9 @@ li > p { margin-top: 0.5em; }
          (let [todo-str (when (:todo node) (str "**" (name (:todo node)) "** "))
                priority-str (when (:priority node) (str "[#" (:priority node) "] "))
                tags-str (when (seq (:tags node)) (str " `:" (str/join ":" (:tags node)) ":`"))
-               heading (str (apply str (repeat (:level node) "#")) " "
+               heading (str (repeat-str (:level node) "#") " "
                             todo-str priority-str
-                            (format-text-markdown (:title node))
+                            (format-text :md (:title node))
                             tags-str)]
            (str heading "\n" (render-children (:children node)))))
 
@@ -1504,41 +1517,27 @@ li > p { margin-top: 0.5em; }
                 (if (seq attr-lines)
                   (str attr-lines "\n" (:content node))
                   (:content node)))
-         (format-text-markdown (:content node)))
+         (format-text :md (:content node)))
 
        :list
        (case fmt
-         :html (cond
-                 (:description node)
-                 (str "<dl>\n"
-                      (str/join "\n" (map #(render-node % fmt) (:items node)))
-                      "\n</dl>")
-                 (:ordered node)
-                 (str "<ol>\n"
-                      (str/join "\n" (map #(render-node % fmt) (:items node)))
-                      "\n</ol>")
-                 :else
-                 (str "<ul>\n"
-                      (str/join "\n" (map #(render-node % fmt) (:items node)))
-                      "\n</ul>"))
+         :html (let [tag (cond (:description node) "dl"
+                               (:ordered node) "ol"
+                               :else "ul")
+                     items-html (str/join "\n" (map #(render-node % fmt) (:items node)))]
+                 (str "<" tag ">\n" items-html "\n</" tag ">"))
          (str/join "\n" (map-indexed
                          (fn [idx item] (render-list-item item idx (:ordered node) level fmt))
                          (:items node))))
 
        :list-item
        (if (= fmt :html)
-         (if (:term node)
-           ;; Description list item: render as dt/dd
-           (let [term-html (format-text-html (:term node))
-                 def-html (format-text-html (:definition node))
-                 children-str (when (seq (:children node))
-                                (str/join "\n" (map #(render-node % fmt) (:children node))))]
-             (str "<dt>" term-html "</dt>\n<dd>" def-html (when children-str (str "\n" children-str)) "</dd>"))
-           ;; Regular list item
-           (let [content-html (format-text-html (:content node))
-                 children-str (when (seq (:children node))
-                                (str/join "\n" (map #(render-node % fmt) (:children node))))]
-             (str "<li>" content-html (when children-str (str "\n" children-str)) "</li>")))
+         (let [children-html (when (seq (:children node))
+                               (str "\n" (str/join "\n" (map #(render-node % fmt) (:children node)))))]
+           (if (:term node)
+             (str "<dt>" (format-text-html (:term node)) "</dt>\n<dd>"
+                  (format-text-html (:definition node)) children-html "</dd>")
+             (str "<li>" (format-text-html (:content node)) children-html "</li>")))
          (render-list-item node 0 false level fmt))
 
        :table
@@ -1584,7 +1583,7 @@ li > p { margin-top: 0.5em; }
                          (str/join "\n"))
                     "\n</blockquote>")
          :org (str "#+BEGIN_QUOTE\n" (:content node) "\n#+END_QUOTE")
-         (str/join "\n" (map #(str "> " (format-text-markdown %)) (str/split-lines (:content node)))))
+         (str/join "\n" (map #(str "> " (format-text :md %)) (str/split-lines (:content node)))))
 
        :property-drawer
        (if (= fmt :org) (render-properties-org (:properties node)) "")
@@ -1593,7 +1592,7 @@ li > p { margin-top: 0.5em; }
        (case fmt
          :html (str "<!-- " (escape-html (:content node)) " -->")
          :org (prefix-lines "# " (:content node))
-         (str "<!-- " (:content node) " -->"))
+         (str "<!-- " (escape-html (:content node)) " -->"))
 
        :fixed-width
        (case fmt
@@ -1608,7 +1607,7 @@ li > p { margin-top: 0.5em; }
                       "<a href=\"#fnref-" label "\" class=\"footnote-backref\"><sup>" label "</sup></a> "
                       (format-text-html (:content node)) "</div>"))
          :org (str "[fn:" (:label node) "] " (:content node))
-         (str "[^" (:label node) "]: " (format-text-markdown (:content node))))
+         (str "[^" (:label node) "]: " (format-text :md (:content node))))
 
        :block
        (let [block-type (:block-type node)
@@ -1633,12 +1632,15 @@ li > p { margin-top: 0.5em; }
                          "\n" (:content node) "\n#+END_" (upper-name block-type))))
            ;; markdown
            (case block-type
+             :warning (str "> **Warning**\n" (str/join "\n" (map #(str "> " %) (str/split-lines (:content node)))))
+             :note (str "> **Note**\n" (str/join "\n" (map #(str "> " %) (str/split-lines (:content node)))))
              :export (if (= export-type "markdown") (:content node) "")
+             :example (str "```\n" (:content node) "\n```")
              (str "```" (name block-type) "\n" (:content node) "\n```"))))
 
        :html-line
        (case fmt
-         :html (str "<p>" (:content node) "</p>")
+         :html (:content node)  ;; Raw HTML, no wrapper
          :org (prefix-lines "#+html: " (:content node))
          "") ;; markdown: remove
 
