@@ -48,7 +48,7 @@
 (def property-drawer-end-pattern #"^\s*:END:\s*$")
 (def property-pattern #"^\s*:([\w_-]+):\s*(.*)$")
 (def list-item-pattern #"^(\s*)(-|\+|\*|\d+[.)])\s+(.*)$")
-(def description-item-pattern #"^(.+?)\s+::\s+(.*)$")
+(def description-item-pattern #"^(.+?)\s+::(?:\s+(.*))?$")
 (def table-pattern #"^\s*\|.*\|\s*$")
 (def table-separator-pattern #"^\s*\|-.*\|\s*$")
 (def generic-block-begin-pattern #"(?i)^\s*#\+BEGIN_(\w+)(?:\s+(.*))?$")
@@ -291,10 +291,12 @@
    :verbatim  #"(?<![^\s\p{Punct}])=([^=\s](?:[^=]*[^=\s])?)=(?![^\s\p{Punct}])"})
 
 (defn escape-html [text]
-  (-> text
-      (str/replace "&" "&amp;")
-      (str/replace "<" "&lt;")
-      (str/replace ">" "&gt;")))
+  (if (nil? text)
+    ""
+    (-> text
+        (str/replace "&" "&amp;")
+        (str/replace "<" "&lt;")
+        (str/replace ">" "&gt;"))))
 
 (defn- non-blank? [s] (and s (not (str/blank? s))))
 
@@ -497,46 +499,50 @@
           text replacements))
 
 (defn format-text-markdown [text]
-  (let [;; First, protect existing markdown links and code
-        [protected restore] (protect-patterns text [[#"\[[^\]]+\]\([^)]+\)" "MD-LINK-"]
-                                                    [#"`[^`]+`" "MD-CODE-"]])
-        ;; Convert org links to markdown, then protect them before applying emphasis
-        with-links (-> protected
-                       (str/replace link-with-desc-pattern #(format-link :md %))
-                       (str/replace link-without-desc-pattern #(format-link :md [% (second %) nil])))
-        ;; Protect the newly created markdown links from emphasis processing
-        [link-protected link-restore] (protect-patterns with-links [[#"\[[^\]]+\]\([^)]+\)" "ORG-LINK-"]])
-        ;; Now apply emphasis patterns safely
-        formatted (-> link-protected
-                      (apply-format-patterns md-format-replacements)
-                      (str/replace footnote-ref-pattern "[^$1]"))]
-    (restore (link-restore formatted))))
+  (if (or (nil? text) (str/blank? text))
+    ""
+    (let [;; First, protect existing markdown links and code
+          [protected restore] (protect-patterns text [[#"\[[^\]]+\]\([^)]+\)" "MD-LINK-"]
+                                                      [#"`[^`]+`" "MD-CODE-"]])
+          ;; Convert org links to markdown, then protect them before applying emphasis
+          with-links (-> protected
+                         (str/replace link-with-desc-pattern #(format-link :md %))
+                         (str/replace link-without-desc-pattern #(format-link :md [% (second %) nil])))
+          ;; Protect the newly created markdown links from emphasis processing
+          [link-protected link-restore] (protect-patterns with-links [[#"\[[^\]]+\]\([^)]+\)" "ORG-LINK-"]])
+          ;; Now apply emphasis patterns safely
+          formatted (-> link-protected
+                        (apply-format-patterns md-format-replacements)
+                        (str/replace footnote-ref-pattern "[^$1]"))]
+      (restore (link-restore formatted)))))
 
 (defn format-text-html [text]
-  (let [;; First protect macros and org links before escaping HTML
-        ;; Macro pattern must come first: {{{name(args)}}} where args can contain anything
-        [protected-content restore-content] (protect-patterns text [[#"\{\{\{.+?\}\}\}" "ORG-MACRO-"]
-                                                                    [link-with-desc-pattern "ORG-LINK-DESC-"]
-                                                                    [link-without-desc-pattern "ORG-LINK-PLAIN-"]])
-        ;; Escape HTML in the text (but not in protected content)
-        escaped (escape-html protected-content)
-        ;; Restore org links and macros, convert links to HTML
-        with-links (-> (restore-content escaped)
-                       (str/replace link-with-desc-pattern #(format-link :html %))
-                       (str/replace link-without-desc-pattern #(format-link :html [% (second %) nil])))
-        ;; Protect the HTML links and macros from emphasis processing
-        [protected restore] (protect-patterns with-links [[#"<a\s[^>]*>[^<]*</a>" "HTML-LINK-"]
-                                                          [#"\{\{\{.+?\}\}\}" "HTML-MACRO-"]])
-        ;; Now apply emphasis patterns safely
-        formatted (-> protected
-                      (str/replace (:bold format-patterns) "<strong>$1</strong>")
-                      (str/replace (:italic format-patterns) "<em>$1</em>")
-                      (str/replace (:underline format-patterns) "<u>$1</u>")
-                      (str/replace (:strike format-patterns) "<del>$1</del>")
-                      (str/replace (:code format-patterns) #(str "<code>" (escape-html (second %)) "</code>"))
-                      (str/replace (:verbatim format-patterns) #(str "<code>" (escape-html (second %)) "</code>"))
-                      (str/replace footnote-ref-pattern "<sup><a href=\"#fn-$1\">$1</a></sup>"))]
-    (restore formatted)))
+  (if (or (nil? text) (str/blank? text))
+    ""
+    (let [;; First protect macros and org links before escaping HTML
+          ;; Macro pattern must come first: {{{name(args)}}} where args can contain anything
+          [protected-content restore-content] (protect-patterns text [[#"\{\{\{.+?\}\}\}" "ORG-MACRO-"]
+                                                                      [link-with-desc-pattern "ORG-LINK-DESC-"]
+                                                                      [link-without-desc-pattern "ORG-LINK-PLAIN-"]])
+          ;; Escape HTML in the text (but not in protected content)
+          escaped (escape-html protected-content)
+          ;; Restore org links and macros, convert links to HTML
+          with-links (-> (restore-content escaped)
+                         (str/replace link-with-desc-pattern #(format-link :html %))
+                         (str/replace link-without-desc-pattern #(format-link :html [% (second %) nil])))
+          ;; Protect the HTML links and macros from emphasis processing
+          [protected restore] (protect-patterns with-links [[#"<a\s[^>]*>[^<]*</a>" "HTML-LINK-"]
+                                                            [#"\{\{\{.+?\}\}\}" "HTML-MACRO-"]])
+          ;; Now apply emphasis patterns safely
+          formatted (-> protected
+                        (str/replace (:bold format-patterns) "<strong>$1</strong>")
+                        (str/replace (:italic format-patterns) "<em>$1</em>")
+                        (str/replace (:underline format-patterns) "<u>$1</u>")
+                        (str/replace (:strike format-patterns) "<del>$1</del>")
+                        (str/replace (:code format-patterns) #(str "<code>" (escape-html (second %)) "</code>"))
+                        (str/replace (:verbatim format-patterns) #(str "<code>" (escape-html (second %)) "</code>"))
+                        (str/replace footnote-ref-pattern "<sup><a href=\"#fn-$1\">$1</a></sup>"))]
+      (restore formatted))))
 
 (defn extract-single-image-link
   "If text contains exactly one org link and it's an image, return [url desc].
@@ -644,48 +650,138 @@
    Returns {:term term :definition definition} or nil."
   [content]
   (when-let [[_ term definition] (re-matches description-item-pattern content)]
-    {:term (str/trim term) :definition (str/trim definition)}))
+    {:term (str/trim term) :definition (if definition (str/trim definition) "")}))
 
-(defn parse-list-items [indexed-lines initial-indent]
-  (loop [[{:keys [line num]} & more :as remaining] indexed-lines
-         items [] current-item nil]
-    (if (empty? remaining)
-      [(flush-item items current-item) remaining]
-      (if-let [[_ indent marker content] (re-matches list-item-pattern line)]
-        (let [indent-len (count indent)]
-          (cond
-            (= indent-len initial-indent)
-            (let [desc-item (parse-description-item content)
-                  new-item (if desc-item
-                             (make-node :list-item
-                                        :term (:term desc-item)
-                                        :definition (:definition desc-item)
-                                        :content content
-                                        :children []
-                                        :line num)
-                             (make-node :list-item :content content :children [] :line num))]
-              (recur more
-                     (flush-item items current-item)
-                     new-item))
+;; Forward declaration - parse-content is defined later but needed by parse-list-items
+(declare parse-content)
 
-            (> indent-len initial-indent)
-            (if current-item
-              (let [sub-is-ordered             (ordered-marker? marker)
-                    [sublist-items rest-lines] (parse-list-items remaining indent-len)
-                    sublist                    (make-node :list :items sublist-items :ordered sub-is-ordered)
-                    updated-item               (update current-item :children conj sublist)]
-                (recur rest-lines (conj (vec (butlast items)) updated-item) nil))
-              (recur more items current-item))
+(defn normalize-marker
+  "Normalize list markers for comparison.
+   Ordered markers (1. 2. 1) etc.) all normalize to :ordered.
+   Unordered markers stay as-is (-, +, *)."
+  [marker]
+  (if (ordered-marker? marker)
+    :ordered
+    marker))
 
-            :else
-            [(flush-item items current-item) remaining]))
-        [(flush-item items current-item) remaining]))))
+(defn collect-list-item-body
+  "Collect continuation lines for a list item until we hit another list item,
+   a headline, or a non-indented line. Returns [indexed-lines remaining]."
+  [indexed-lines min-indent]
+  (loop [[{:keys [line]} & more :as remaining] indexed-lines
+         collected []]
+    (cond
+      (empty? remaining)
+      [collected remaining]
+
+      (nil? line)
+      [collected remaining]
+
+      ;; Stop at headlines
+      (headline? line)
+      [collected remaining]
+
+      ;; Stop at list items (same or less indent)
+      (and (re-matches list-item-pattern line)
+           (let [[_ indent _ _] (re-matches list-item-pattern line)]
+             (<= (count indent) min-indent)))
+      [collected remaining]
+
+      ;; Blank lines are included (they separate paragraphs)
+      (str/blank? line)
+      (recur more (conj collected (first remaining)))
+
+      ;; Indented continuation lines (more than min-indent) are included
+      (re-matches #"^\s+.*$" line)
+      (recur more (conj collected (first remaining)))
+
+      ;; Non-indented non-blank line ends the item
+      :else
+      [collected remaining])))
+
+(defn parse-list-items [indexed-lines initial-indent initial-marker]
+  (let [normalized-initial (normalize-marker initial-marker)]
+    (loop [[{:keys [line num]} & more :as remaining] indexed-lines
+           items [] current-item nil after-blank false]
+      (if (or (empty? remaining) (nil? line))
+        [(flush-item items current-item) remaining]
+        (cond
+          ;; Headlines always end the list
+          (headline? line)
+          [(flush-item items current-item) remaining]
+
+          ;; New list item at same indent level with same marker type
+          (when-let [[_ indent marker content] (re-matches list-item-pattern line)]
+            (and (= (count indent) initial-indent)
+                 (= (normalize-marker marker) normalized-initial)
+                 ;; After a blank line, only continue if it's clearly a list continuation
+                 ;; (not a headline-like pattern at column 0)
+                 (not (and after-blank (= initial-indent 0) (= marker "*")))))
+          (let [[_ indent marker content] (re-matches list-item-pattern line)
+                desc-item (parse-description-item content)
+                ;; Collect body lines for this item
+                [body-lines rest-after-body] (collect-list-item-body more initial-indent)
+                ;; Check if definition is empty and first body line should be the definition
+                [definition body-for-parsing]
+                (if (and desc-item
+                         (str/blank? (:definition desc-item))
+                         (seq body-lines))
+                  ;; Find first non-blank, non-ignored line as definition
+                  (let [first-content (->> body-lines
+                                           (drop-while #(or (str/blank? (:line %))
+                                                            (ignored-keyword-line? (:line %))))
+                                           first)]
+                    (if first-content
+                      [(str/trim (:line first-content))
+                       (rest (drop-while #(or (str/blank? (:line %))
+                                              (ignored-keyword-line? (:line %))) body-lines))]
+                      ["" body-lines]))
+                  [(or (:definition desc-item) "") body-lines])
+                ;; Parse the body lines as content
+                [children _] (if (seq body-for-parsing)
+                               (parse-content body-for-parsing)
+                               [[] []])
+                new-item (if desc-item
+                           (make-node :list-item
+                                      :term (:term desc-item)
+                                      :definition definition
+                                      :content content
+                                      :children children
+                                      :line num)
+                           (make-node :list-item
+                                      :content content
+                                      :children children
+                                      :line num))]
+            (recur rest-after-body
+                   (flush-item items current-item)
+                   new-item
+                   false))
+
+          ;; Nested list item (deeper indent) - starts a new sublist with its own marker
+          (when-let [[_ indent marker content] (re-matches list-item-pattern line)]
+            (> (count indent) initial-indent))
+          (if current-item
+            (let [[_ indent marker _] (re-matches list-item-pattern line)
+                  sub-is-ordered (ordered-marker? marker)
+                  [sublist-items rest-lines] (parse-list-items remaining (count indent) marker)
+                  sublist (make-node :list :items sublist-items :ordered sub-is-ordered)
+                  updated-item (update current-item :children conj sublist)]
+              (recur rest-lines (flush-item items updated-item) nil false))
+            (recur more items current-item after-blank))
+
+          ;; Blank line - skip but track that we saw one
+          (str/blank? line)
+          (recur more items current-item true)
+
+          ;; End of list (different marker, less indent, or non-continuation line)
+          :else
+          [(flush-item items current-item) remaining])))))
 
 (defn process-list [indexed-lines]
   (let [{:keys [line num]} (first indexed-lines)]
     (if-let [[_ indent marker _] (re-matches list-item-pattern line)]
       (let [initial-indent     (count indent)
-            [items rest-lines] (parse-list-items indexed-lines initial-indent)
+            [items rest-lines] (parse-list-items indexed-lines initial-indent marker)
             ordered            (ordered-marker? marker)
             is-description     (some :term items)]
         [(make-node :list :items items :ordered ordered :description is-description :line num) rest-lines])
