@@ -48,6 +48,7 @@
 (def property-drawer-end-pattern #"^\s*:END:\s*$")
 (def property-pattern #"^\s*:([\w_-]+):\s*(.*)$")
 (def list-item-pattern #"^(\s*)(-|\+|\*|\d+[.)])\s+(.*)$")
+(def description-item-pattern #"^(.+?)\s+::\s+(.*)$")
 (def table-pattern #"^\s*\|.*\|\s*$")
 (def table-separator-pattern #"^\s*\|-.*\|\s*$")
 (def generic-block-begin-pattern #"(?i)^\s*#\+BEGIN_(\w+)(?:\s+(.*))?$")
@@ -604,6 +605,13 @@
             (recur more properties)))))
     [nil {} indexed-lines]))
 
+(defn parse-description-item
+  "Check if content matches a description list item (term :: definition).
+   Returns {:term term :definition definition} or nil."
+  [content]
+  (when-let [[_ term definition] (re-matches description-item-pattern content)]
+    {:term (str/trim term) :definition (str/trim definition)}))
+
 (defn parse-list-items [indexed-lines initial-indent]
   (loop [[{:keys [line num]} & more :as remaining] indexed-lines
          items [] current-item nil]
@@ -613,9 +621,18 @@
         (let [indent-len (count indent)]
           (cond
             (= indent-len initial-indent)
-            (recur more
-                   (flush-item items current-item)
-                   (make-node :list-item :content content :children [] :line num))
+            (let [desc-item (parse-description-item content)
+                  new-item (if desc-item
+                             (make-node :list-item
+                                        :term (:term desc-item)
+                                        :definition (:definition desc-item)
+                                        :content content
+                                        :children []
+                                        :line num)
+                             (make-node :list-item :content content :children [] :line num))]
+              (recur more
+                     (flush-item items current-item)
+                     new-item))
 
             (> indent-len initial-indent)
             (if current-item
@@ -635,8 +652,9 @@
     (if-let [[_ indent marker _] (re-matches list-item-pattern line)]
       (let [initial-indent     (count indent)
             [items rest-lines] (parse-list-items indexed-lines initial-indent)
-            ordered            (ordered-marker? marker)]
-        [(make-node :list :items items :ordered ordered :line num) rest-lines])
+            ordered            (ordered-marker? marker)
+            is-description     (some :term items)]
+        [(make-node :list :items items :ordered ordered :description is-description :line num) rest-lines])
       [nil indexed-lines])))
 
 (defn parse-table [indexed-lines]
@@ -1153,20 +1171,37 @@ li > p { margin-top: 0.5em; }
 
        :list
        (case fmt
-         :html (let [tag (if (:ordered node) "ol" "ul")]
-                 (str "<" tag ">\n"
+         :html (cond
+                 (:description node)
+                 (str "<dl>\n"
                       (str/join "\n" (map #(render-node % fmt) (:items node)))
-                      "\n</" tag ">"))
+                      "\n</dl>")
+                 (:ordered node)
+                 (str "<ol>\n"
+                      (str/join "\n" (map #(render-node % fmt) (:items node)))
+                      "\n</ol>")
+                 :else
+                 (str "<ul>\n"
+                      (str/join "\n" (map #(render-node % fmt) (:items node)))
+                      "\n</ul>"))
          (str/join "\n" (map-indexed
                          (fn [idx item] (render-list-item item idx (:ordered node) level fmt))
                          (:items node))))
 
        :list-item
        (if (= fmt :html)
-         (let [content-html (format-text-html (:content node))
-               children-str (when (seq (:children node))
-                              (str/join "\n" (map #(render-node % fmt) (:children node))))]
-           (str "<li>" content-html (when children-str (str "\n" children-str)) "</li>"))
+         (if (:term node)
+           ;; Description list item: render as dt/dd
+           (let [term-html (format-text-html (:term node))
+                 def-html (format-text-html (:definition node))
+                 children-str (when (seq (:children node))
+                                (str/join "\n" (map #(render-node % fmt) (:children node))))]
+             (str "<dt>" term-html "</dt>\n<dd>" def-html (when children-str (str "\n" children-str)) "</dd>"))
+           ;; Regular list item
+           (let [content-html (format-text-html (:content node))
+                 children-str (when (seq (:children node))
+                                (str/join "\n" (map #(render-node % fmt) (:children node))))]
+             (str "<li>" content-html (when children-str (str "\n" children-str)) "</li>")))
          (render-list-item node 0 false level fmt))
 
        :table
