@@ -65,6 +65,9 @@
 (def link-without-desc-pattern #"\[\[([^\]]+)\]\]")
 (def link-type-pattern #"^(file|id|mailto|http|https|ftp|news|shell|elisp|doi):(.*)$")
 
+;; Affiliated keywords patterns (#+attr_html, #+caption, #+name, etc.)
+(def affiliated-keyword-pattern #"(?i)^\s*#\+(attr_\w+|caption|name|header|results):\s*(.*)$")
+
 ;; Line Type Predicates
 (defn headline? [line] (re-matches headline-pattern line))
 (defn metadata-line? [line] (re-matches metadata-pattern line))
@@ -84,6 +87,7 @@
       (re-matches property-pattern line)))
 (defn list-item? [line] (or (unordered-list-item? line) (ordered-list-item? line)))
 (defn continuation-line? [line] (and (re-matches continuation-pattern line) (not (list-item? line))))
+(defn affiliated-keyword? [line] (re-matches affiliated-keyword-pattern line))
 (defn index-lines [lines] (map-indexed (fn [i line] {:line line :num (inc i)}) lines))
 
 ;; Text Unwrapping
@@ -185,6 +189,78 @@
     {:type (keyword t) :target target}
     {:type :external :target s}))
 
+;; Parse Org-style attribute syntax: :key value :key2 "quoted value"
+(defn parse-attr-string
+  "Parse an Org attribute string like ':width 300 :alt \"An image\" :class my-class'
+   into a map {:width \"300\" :alt \"An image\" :class \"my-class\"}"
+  [s]
+  (when (and s (not (str/blank? s)))
+    (loop [remaining (str/trim s)
+           result {}]
+      (if (str/blank? remaining)
+        result
+        ;; Match :key followed by either "quoted value" or unquoted-value
+        (if-let [[_ key quoted unquoted rest]
+                 (re-matches #"^:(\w+)\s+(?:\"([^\"]*)\"|(\S+))(.*)$" remaining)]
+          (recur (str/trim rest)
+                 (assoc result (keyword key) (or quoted unquoted)))
+          ;; No match, skip to next potential key or end
+          (if-let [[_ rest] (re-matches #"^\S+\s*(.*)$" remaining)]
+            (recur rest result)
+            result))))))
+
+;; Parse affiliated keywords and attach to following element
+(defn parse-affiliated-keywords
+  "Collect consecutive affiliated keyword lines (#+attr_html, #+caption, etc.)
+   Returns [affiliated-map remaining-lines] where affiliated-map has:
+   {:caption \"...\" :name \"...\" :attr {:html {...} :org {...}}}"
+  [indexed-lines]
+  (loop [[{:keys [line]} & more :as remaining] indexed-lines
+         result {:attr {}}]
+    (if (or (empty? remaining) (not (affiliated-keyword? line)))
+      [result remaining]
+      (let [[_ kw-name value] (re-matches affiliated-keyword-pattern line)
+            kw-lower (str/lower-case kw-name)]
+        (cond
+          ;; #+attr_html: :key val ... -> nested under :attr :html
+          (str/starts-with? kw-lower "attr_")
+          (let [attr-type (keyword (subs kw-lower 5)) ; "attr_html" -> :html
+                parsed-attrs (parse-attr-string value)
+                current-attrs (get-in result [:attr attr-type] {})]
+            (recur more (assoc-in result [:attr attr-type] (merge current-attrs parsed-attrs))))
+
+          ;; #+caption: ... -> :caption
+          (= kw-lower "caption")
+          (recur more (assoc result :caption (str/trim value)))
+
+          ;; #+name: ... -> :name
+          (= kw-lower "name")
+          (recur more (assoc result :name (str/trim value)))
+
+          ;; Other keywords (#+header, #+results, etc.)
+          :else
+          (recur more (assoc result (keyword kw-lower) (str/trim value))))))))
+
+(defn has-affiliated-keywords?
+  "Check if the affiliated map contains any actual content."
+  [affiliated]
+  (or (seq (:caption affiliated))
+      (seq (:name affiliated))
+      (seq (:attr affiliated))
+      (some #(and (not= % :attr) (seq (get affiliated %)))
+            (keys affiliated))))
+
+(defn attach-affiliated
+  "Attach affiliated keywords to a node if present."
+  [node affiliated]
+  (if (has-affiliated-keywords? affiliated)
+    (let [;; Clean up empty :attr map
+          cleaned (if (empty? (:attr affiliated))
+                    (dissoc affiliated :attr)
+                    affiliated)]
+      (assoc node :affiliated cleaned))
+    node))
+
 ;; Text Formatting
 
 (def format-patterns
@@ -245,11 +321,18 @@
   (when url
     (boolean (re-find #"^https?://" url))))
 
+(defn expand-home
+  "Expand ~ to user home directory in file paths."
+  [path]
+  (if (and path (str/starts-with? path "~/"))
+    (str (System/getProperty "user.home") (subs path 1))
+    path))
+
 (defn file-to-base64
   "Read a file and return its base64-encoded content, or nil if file doesn't exist."
   [filepath]
   (try
-    (let [file (java.io.File. filepath)]
+    (let [file (java.io.File. (expand-home filepath))]
       (when (.exists file)
         (let [bytes (java.nio.file.Files/readAllBytes (.toPath file))
               encoder (java.util.Base64/getEncoder)]
@@ -264,81 +347,123 @@
           (as-> mime (when-let [b64 (file-to-base64 filepath)]
                        (str "data:" mime ";base64," b64)))))
 
-(defn format-link [fmt [_ url desc]]
-  (let [parsed (parse-link url)
-        link-type (:type parsed)
-        target (:target parsed)
-        ;; For file: links, target is the path; for http(s), url is the full URL
-        actual-url (if (#{:http :https} link-type) url target)
-        is-local-file (= link-type :file)
-        is-remote (#{:http :https} link-type)
-        url-is-image (image-url? actual-url)
-        desc-is-image (and desc (or (image-url? desc) (remote-url? desc)))]
-    (cond
-      ;; Local file images: convert to base64 data URI
-      (and is-local-file url-is-image)
-      (if-let [data-uri (image-to-data-uri target)]
-        (cond
-          (= fmt :html)
-          (if desc-is-image
-            ;; Description is also an image: clickable image (but desc would need to be resolved too)
-            (str "<a href=\"" data-uri "\"><img src=\"" (escape-html desc) "\" alt=\"" (escape-html desc) "\"></a>")
-            ;; No description or text description: inline image
-            (str "<img src=\"" data-uri "\" alt=\"" (escape-html (or desc target)) "\">"))
-          (= fmt :md)
-          (str "![" (or desc target) "](" data-uri ")")
-          :else "")
-        ;; File not found or error: return empty string
-        "")
+(defn build-img-attrs
+  "Build HTML attribute string from a map of attributes.
+   Handles :alt, :title, :width, :height, :class, :id, :style, etc."
+  [attrs]
+  (when (seq attrs)
+    (->> attrs
+         (map (fn [[k v]]
+                (when (and v (not (str/blank? (str v))))
+                  (str " " (name k) "=\"" (escape-html (str v)) "\""))))
+         (apply str))))
 
-      ;; HTML format
-      (= fmt :html)
-      (cond
-        ;; Remote image URL without description: inline image
-        (and is-remote url-is-image (nil? desc))
-        (str "<img src=\"" (escape-html url) "\" alt=\"" (escape-html url) "\">")
+(defn render-image-html
+  "Render an image tag with optional affiliated attributes.
+   src: the image URL or data URI
+   default-alt: fallback alt text if not specified in attrs
+   affiliated: the affiliated keywords map (may contain :caption, :attr {:html {...}})"
+  [src default-alt affiliated]
+  (let [html-attrs (get-in affiliated [:attr :html] {})
+        ;; Use alt from #+attr_html if provided, otherwise default
+        alt (or (:alt html-attrs) default-alt)
+        ;; Build the img tag with all HTML attributes
+        img-attrs (merge {:src src :alt alt}
+                         (dissoc html-attrs :alt)) ; alt already handled
+        img-tag (str "<img" (build-img-attrs img-attrs) ">")
+        ;; Wrap in figure with figcaption if caption is present
+        caption (:caption affiliated)]
+    (if caption
+      (str "<figure>" img-tag "<figcaption>" (escape-html caption) "</figcaption></figure>")
+      img-tag)))
 
-        ;; Remote URL with description that is an image URL: clickable image button
-        (and is-remote desc-is-image)
-        (str "<a href=\"" (escape-html url) "\"><img src=\"" (escape-html desc) "\" alt=\"" (escape-html desc) "\"></a>")
+(defn format-link
+  "Format an org link to the specified format.
+   Optionally accepts affiliated keywords for enhanced image rendering."
+  ([fmt match] (format-link fmt match nil))
+  ([fmt [_ url desc] affiliated]
+   (let [parsed (parse-link url)
+         link-type (:type parsed)
+         target (:target parsed)
+         ;; For file: links, target is the path; for http(s), url is the full URL
+         actual-url (if (#{:http :https} link-type) url target)
+         is-local-file (= link-type :file)
+         is-remote (#{:http :https} link-type)
+         url-is-image (image-url? actual-url)
+         desc-is-image (and desc (or (image-url? desc) (remote-url? desc)))]
+     (cond
+       ;; Local file images: convert to base64 data URI
+       (and is-local-file url-is-image)
+       (if-let [data-uri (image-to-data-uri target)]
+         (cond
+           (= fmt :html)
+           (if affiliated
+             (render-image-html data-uri (or desc target) affiliated)
+             (if desc-is-image
+               (str "<a href=\"" data-uri "\"><img src=\"" (escape-html desc) "\" alt=\"" (escape-html desc) "\"></a>")
+               (str "<img src=\"" data-uri "\" alt=\"" (escape-html (or desc target)) "\">")))
+           (= fmt :md)
+           (str "![" (or desc target) "](" data-uri ")")
+           :else "")
+         ;; File not found or error: return empty string
+         "")
 
-        ;; Default: regular link
-        :else
-        (let [href (case link-type
-                     :file target
-                     :id (str "#" target)
-                     :mailto (str "mailto:" target)
-                     (escape-html url))]
-          (str "<a href=\"" href "\">" (or desc (escape-html url)) "</a>")))
+       ;; HTML format
+       (= fmt :html)
+       (cond
+         ;; Remote image URL without description: inline image
+         (and is-remote url-is-image (nil? desc))
+         (if affiliated
+           (render-image-html url url affiliated)
+           (str "<img src=\"" (escape-html url) "\" alt=\"" (escape-html url) "\">"))
 
-      ;; Markdown format
-      (= fmt :md)
-      (cond
-        ;; Remote image URL without description: inline image
-        (and is-remote url-is-image (nil? desc))
-        (str "![" url "](" url ")")
+         ;; Remote image URL with text description: inline image with alt
+         (and is-remote url-is-image desc (not desc-is-image))
+         (if affiliated
+           (render-image-html url desc affiliated)
+           (str "<img src=\"" (escape-html url) "\" alt=\"" (escape-html desc) "\">"))
 
-        ;; Remote URL with description that is an image URL: linked image
-        (and is-remote desc-is-image)
-        (str "[![" desc "](" desc ")](" url ")")
+         ;; Remote URL with description that is an image URL: clickable image button
+         (and is-remote desc-is-image)
+         (str "<a href=\"" (escape-html url) "\"><img src=\"" (escape-html desc) "\" alt=\"" (escape-html desc) "\"></a>")
 
-        ;; Default: regular link
-        :else
-        (let [href (case link-type
-                     :file target
-                     :id (str "#" target)
-                     :mailto (str "mailto:" target)
-                     url)]
-          (str "[" (or desc url) "](" href ")")))
+         ;; Default: regular link
+         :else
+         (let [href (case link-type
+                      :file target
+                      :id (str "#" target)
+                      :mailto (str "mailto:" target)
+                      (escape-html url))]
+           (str "<a href=\"" href "\">" (or desc (escape-html url)) "</a>")))
 
-      ;; Other formats (org): preserve as-is or default behavior
-      :else
-      (let [href (case link-type
-                   :file target
-                   :id (str "#" target)
-                   :mailto (str "mailto:" target)
-                   url)]
-        (str "[" (or desc url) "](" href ")")))))
+       ;; Markdown format
+       (= fmt :md)
+       (cond
+         ;; Remote image URL without description: inline image
+         (and is-remote url-is-image (nil? desc))
+         (str "![" url "](" url ")")
+
+         ;; Remote URL with description that is an image URL: linked image
+         (and is-remote desc-is-image)
+         (str "[![" desc "](" desc ")](" url ")")
+
+         ;; Default: regular link
+         :else
+         (let [href (case link-type
+                      :file target
+                      :id (str "#" target)
+                      :mailto (str "mailto:" target)
+                      url)]
+           (str "[" (or desc url) "](" href ")")))
+
+       ;; Other formats (org): preserve as-is or default behavior
+       :else
+       (let [href (case link-type
+                    :file target
+                    :id (str "#" target)
+                    :mailto (str "mailto:" target)
+                    url)]
+         (str "[" (or desc url) "](" href ")"))))))
 
 (def md-format-replacements
   [[:bold "**$1**"]
@@ -385,6 +510,31 @@
                       (str/replace (:verbatim format-patterns) #(str "<code>" (escape-html (second %)) "</code>"))
                       (str/replace footnote-ref-pattern "<sup><a href=\"#fn-$1\">$1</a></sup>"))]
     (restore formatted)))
+
+(defn extract-single-image-link
+  "If text contains exactly one org link and it's an image, return [url desc].
+   Otherwise return nil."
+  [text]
+  (let [trimmed (str/trim text)
+        ;; Check if the entire content is a single link (with optional whitespace)
+        with-desc-match (re-matches #"^\[\[([^\]]+)\](?:\[([^\]]+)\])?\]$" trimmed)
+        without-desc-match (re-matches #"^\[\[([^\]]+)\]\]$" trimmed)]
+    (when-let [[_ url desc] (or with-desc-match without-desc-match)]
+      (let [parsed (parse-link url)
+            actual-url (if (#{:http :https} (:type parsed)) url (:target parsed))]
+        (when (image-url? actual-url)
+          [url desc])))))
+
+(defn format-paragraph-html
+  "Format a paragraph for HTML, with special handling for image-only paragraphs
+   that have affiliated keywords."
+  [content affiliated]
+  (if-let [[url desc] (and affiliated (extract-single-image-link content))]
+    ;; Image-only paragraph with affiliated keywords: use enhanced rendering
+    (let [match [nil url desc]]
+      (format-link :html match affiliated))
+    ;; Regular paragraph
+    (str "<p>" (format-text-html content) "</p>")))
 
 (defn get-text-formatter [fmt]
   (case fmt :md format-text-markdown :html format-text-html identity))
@@ -606,7 +756,8 @@
                 (fixed-width-line? line)
                 (footnote-def? line)
                 (html-line? line)
-                (latex-line? line))
+                (latex-line? line)
+                (affiliated-keyword? line))
           (when (seq content)
             [(make-node :paragraph :content (str/join "\n" content)
                         :line start-line-num) remaining])
@@ -618,68 +769,86 @@
   (when-let [[node rest-lines] (parser remaining)]
     [rest-lines (conj nodes node)]))
 
+(defn- try-parse-with-affiliated
+  "Try a parser with affiliated keywords; attach them to the resulting node."
+  [parser remaining nodes affiliated]
+  (when-let [[node rest-lines] (parser remaining)]
+    [rest-lines (conj nodes (attach-affiliated node affiliated))]))
+
 (defn parse-content [indexed-lines]
   (loop [[{:keys [line]} & more :as remaining] indexed-lines
-         nodes []]
+         nodes []
+         pending-affiliated nil]
     (if (empty? remaining)
       [nodes remaining]
       (cond
         (str/blank? line)
-        (recur more nodes)
+        (recur more nodes pending-affiliated)
 
         (headline? line)
         [nodes remaining]
+
+        ;; Collect affiliated keywords (#+attr_html, #+caption, etc.)
+        (affiliated-keyword? line)
+        (let [[affiliated rest-lines] (parse-affiliated-keywords remaining)]
+          (recur rest-lines nodes affiliated))
 
         (re-matches property-drawer-start-pattern line)
         (let [[_ properties rest-lines] (parse-property-drawer remaining)
               drawer-node (make-node :property-drawer :properties properties
                                      :line (:num (first remaining)))]
-          (recur rest-lines (conj nodes drawer-node)))
+          (recur rest-lines (conj nodes drawer-node) nil))
 
         (comment-line? line)
         (let [[rest-lines nodes'] (or (try-parse parse-comment remaining nodes)
                                       [more nodes])]
-          (recur rest-lines nodes'))
+          (recur rest-lines nodes' nil))
 
         (fixed-width-line? line)
         (let [[rest-lines nodes'] (or (try-parse parse-fixed-width remaining nodes)
                                       [more nodes])]
-          (recur rest-lines nodes'))
+          (recur rest-lines nodes' nil))
 
         (html-line? line)
         (let [[rest-lines nodes'] (or (try-parse parse-html-lines remaining nodes)
                                       [more nodes])]
-          (recur rest-lines nodes'))
+          (recur rest-lines nodes' nil))
 
         (latex-line? line)
         (let [[rest-lines nodes'] (or (try-parse parse-latex-lines remaining nodes)
                                       [more nodes])]
-          (recur rest-lines nodes'))
+          (recur rest-lines nodes' nil))
 
         (footnote-def? line)
         (let [[rest-lines nodes'] (or (try-parse parse-footnote-definition remaining nodes)
                                       [more nodes])]
-          (recur rest-lines nodes'))
+          (recur rest-lines nodes' nil))
 
         (list-item? line)
-        (let [[rest-lines nodes'] (or (try-parse process-list remaining nodes)
+        (let [[rest-lines nodes'] (or (if pending-affiliated
+                                        (try-parse-with-affiliated process-list remaining nodes pending-affiliated)
+                                        (try-parse process-list remaining nodes))
                                       [more nodes])]
-          (recur rest-lines nodes'))
+          (recur rest-lines nodes' nil))
 
         (table-line? line)
-        (let [[rest-lines nodes'] (or (try-parse parse-table remaining nodes)
+        (let [[rest-lines nodes'] (or (if pending-affiliated
+                                        (try-parse-with-affiliated parse-table remaining nodes pending-affiliated)
+                                        (try-parse parse-table remaining nodes))
                                       [more nodes])]
-          (recur rest-lines nodes'))
+          (recur rest-lines nodes' nil))
 
         (re-matches generic-block-begin-pattern line)
-        (let [[rest-lines nodes'] (or (try-parse parse-block remaining nodes)
+        (let [[rest-lines nodes'] (or (if pending-affiliated
+                                        (try-parse-with-affiliated parse-block remaining nodes pending-affiliated)
+                                        (try-parse parse-block remaining nodes))
                                       [more nodes])]
-          (recur rest-lines nodes'))
+          (recur rest-lines nodes' nil))
 
         :else
         (if-let [[paragraph rest-lines] (parse-paragraph remaining)]
-          (recur rest-lines (conj nodes paragraph))
-          (recur more nodes))))))
+          (recur rest-lines (conj nodes (attach-affiliated paragraph pending-affiliated)) nil)
+          (recur more nodes nil))))))
 
 (defn update-path-stack [path-stack new-level title]
   (let [current-level (count path-stack)]
@@ -836,6 +1005,9 @@ h1, h2, h3, h4, h5, h6 { line-height: 1.2; }
 pre { background-color: #f8f8f8; border: 1px solid #ddd; border-radius: 4px; padding: 1em; overflow-x: auto; }
 code { font-family: monospace; }
 img { max-width: 100%; }
+figure { margin: 1em 0; }
+figure img { display: block; }
+figcaption { font-size: 0.9em; color: #555; margin-top: 0.5em; font-style: italic; }
 pre code { background-color: transparent; border: none; padding: 0; }
 blockquote { border-left: 4px solid #eee; margin-left: 0; padding-left: 1em; color: #555; }
 table { border-collapse: collapse; width: 100%; margin-bottom: 1em; }
@@ -958,8 +1130,25 @@ li > p { margin-top: 0.5em; }
 
        :paragraph
        (case fmt
-         :html (str "<p>" (format-text-html (:content node)) "</p>")
-         :org (:content node)
+         :html (format-paragraph-html (:content node) (:affiliated node))
+         :org (let [affiliated (:affiliated node)
+                    attr-lines (when affiliated
+                                 (str/join "\n"
+                                           (concat
+                                            (when-let [caption (:caption affiliated)]
+                                              [(str "#+caption: " caption)])
+                                            (when-let [name (:name affiliated)]
+                                              [(str "#+name: " name)])
+                                            (for [[attr-type attrs] (:attr affiliated)
+                                                  :when (seq attrs)]
+                                              (str "#+attr_" (name attr-type) ": "
+                                                   (str/join " " (for [[k v] attrs]
+                                                                   (if (str/includes? v " ")
+                                                                     (str ":" (name k) " \"" v "\"")
+                                                                     (str ":" (name k) " " v)))))))))]
+                (if (seq attr-lines)
+                  (str attr-lines "\n" (:content node))
+                  (:content node)))
          (format-text-markdown (:content node)))
 
        :list
