@@ -1665,6 +1665,104 @@ li > p { margin-top: 0.5em; }
 (defn format-ast-as-yaml [ast]
   (yaml/generate-string ast {:dumper-options {:flow-style :block}}))
 
+;; Statistics
+(defn count-words
+  "Count words in a string."
+  [s]
+  (if (or (nil? s) (str/blank? s))
+    0
+    (count (re-seq #"\S+" s))))
+
+(defn collect-stats
+  "Recursively collect statistics from AST nodes."
+  [node]
+  (let [node-type (:type node)
+        children (:children node [])
+        items (:items node [])
+        ;; Recursively collect from children and items
+        child-stats (reduce (fn [acc child]
+                              (merge-with + acc (collect-stats child)))
+                            {}
+                            (concat children items))
+        ;; Count this node
+        base-stats (case node-type
+                     :section (-> child-stats
+                                  (update :sections (fnil inc 0))
+                                  (update :words (fnil + 0) (count-words (:title node))))
+                     :paragraph (-> child-stats
+                                    (update :paragraphs (fnil inc 0))
+                                    (update :words (fnil + 0) (count-words (:content node))))
+                     :table (update child-stats :tables (fnil inc 0))
+                     :list (update child-stats :lists (fnil inc 0))
+                     :list-item (-> child-stats
+                                    (update :list-items (fnil inc 0))
+                                    (update :words (fnil + 0)
+                                            (+ (count-words (:content node))
+                                               (count-words (:term node))
+                                               (count-words (:definition node)))))
+                     :src-block (update child-stats :src-blocks (fnil inc 0))
+                     :quote-block (-> child-stats
+                                      (update :quote-blocks (fnil inc 0))
+                                      (update :words (fnil + 0) (count-words (:content node))))
+                     :block (update child-stats :blocks (fnil inc 0))
+                     :comment (update child-stats :comments (fnil inc 0))
+                     :fixed-width (update child-stats :fixed-width (fnil inc 0))
+                     :footnote-def (-> child-stats
+                                       (update :footnotes (fnil inc 0))
+                                       (update :words (fnil + 0) (count-words (:content node))))
+                     :html-line (update child-stats :html-lines (fnil inc 0))
+                     :latex-line (update child-stats :latex-lines (fnil inc 0))
+                     :property-drawer (update child-stats :property-drawers (fnil inc 0))
+                     :document child-stats
+                     child-stats)]
+    base-stats))
+
+(defn compute-stats
+  "Compute statistics for an AST and return a sorted map."
+  [ast]
+  (let [raw-stats (collect-stats ast)
+        ;; Define display order
+        ordered-keys [:sections :paragraphs :words :lists :list-items
+                      :tables :src-blocks :quote-blocks :blocks
+                      :footnotes :comments :fixed-width :html-lines
+                      :latex-lines :property-drawers]
+        ;; Filter to only keys with values > 0
+        present-stats (into {} (filter (fn [[_ v]] (and v (pos? v))) raw-stats))]
+    ;; Return in order, only present keys
+    (into (sorted-map-by (fn [a b]
+                           (let [ia (.indexOf ordered-keys a)
+                                 ib (.indexOf ordered-keys b)
+                                 ia' (if (neg? ia) 999 ia)
+                                 ib' (if (neg? ib) 999 ib)]
+                             (compare ia' ib'))))
+          present-stats)))
+
+(defn format-stats
+  "Format statistics for display."
+  [stats]
+  (let [label-map {:sections "Sections"
+                   :paragraphs "Paragraphs"
+                   :words "Words"
+                   :lists "Lists"
+                   :list-items "List items"
+                   :tables "Tables"
+                   :src-blocks "Source blocks"
+                   :quote-blocks "Quote blocks"
+                   :blocks "Other blocks"
+                   :footnotes "Footnotes"
+                   :comments "Comments"
+                   :fixed-width "Fixed-width blocks"
+                   :html-lines "HTML lines"
+                   :latex-lines "LaTeX lines"
+                   :property-drawers "Property drawers"}
+        max-label-len (apply max (map #(count (get label-map % (name %))) (keys stats)))]
+    (str/join "\n"
+              (map (fn [[k v]]
+                     (let [label (get label-map k (name k))
+                           padding (apply str (repeat (- max-label-len (count label)) " "))]
+                       (str label ": " padding v)))
+                   stats))))
+
 ;; CLI Options
 
 (def cli-options
@@ -1675,6 +1773,7 @@ li > p { margin-top: 0.5em; }
     :default "md" :validate [#{"md" "html" "org"} "Must be: md, html, org"]]
    ["-e" "--export FORMAT" "Export document to markdown, html, or org"
     :validate [#{"markdown" "html" "org"} "Must be: markdown, html, org"]]
+   ["-s" "--stats" "Compute and display document statistics"]
    ["-n" "--no-unwrap" "Preserve original line breaks"]
    ["-t" "--title REGEX" "Filter: section title matches" :parse-fn re-pattern]
    ["-T" "--section-title REGEX" "Filter: ancestor title matches" :parse-fn re-pattern]
@@ -1745,6 +1844,10 @@ li > p { margin-top: 0.5em; }
                 (doseq [{:keys [line message]} errs]
                   (println (str "Warning (line " line "): " message)))))
             (cond
+              (:stats options)
+              (let [stats (compute-stats filtered-ast)]
+                (println (format-stats stats)))
+
               export-doc
               (case export-doc
                 "markdown" (println (render-ast-as-markdown cleaned-ast))
