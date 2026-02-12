@@ -110,6 +110,38 @@
 (defn affiliated-keyword? [line] (re-matches affiliated-keyword-pattern line))
 (defn index-lines [lines] (map-indexed (fn [i line] {:line line :num (inc i)}) lines))
 
+(defn unescape-comma
+  "Remove leading comma escape from a line inside a block.
+   A comma escapes lines starting with * or #+ inside blocks."
+  [line]
+  (if (and (string? line)
+           (re-matches #"^,([\*#]).*" line))
+    (subs line 1)
+    line))
+
+(defn unescape-block-content
+  "Remove comma escapes from all lines in block content."
+  [content]
+  (->> (str/split-lines content)
+       (map unescape-comma)
+       (str/join "\n")))
+
+(defn escape-comma
+  "Add leading comma to escape lines that need it inside blocks.
+   Lines starting with * or #+ need escaping."
+  [line]
+  (if (and (string? line)
+           (re-matches #"^[\*#].*" line))
+    (str "," line)
+    line))
+
+(defn escape-block-content
+  "Add comma escapes to lines that need it in block content."
+  [content]
+  (->> (str/split-lines content)
+       (map escape-comma)
+       (str/join "\n")))
+
 ;; Text Unwrapping
 
 (defn hard-break? [current-line next-line in-block]
@@ -268,37 +300,56 @@
          (not (continuation-line? next-line))) false
     :else true))
 
+(defn unwrap-text-indexed
+  "Unwrap text while preserving original line numbers.
+   Returns a vector of {:line string :num original-line-number} maps."
+  [input]
+  (let [lines (str/split-lines input)
+        indexed (map-indexed (fn [i line] {:line line :num (inc i)}) lines)]
+    (:result
+     (reduce
+      (fn [{:keys [result in-block block-type remaining] :as acc} _]
+        (if (empty? remaining)
+          acc
+          (let [{:keys [line num] :as current} (first remaining)
+                rest-lines (rest remaining)
+                next-item (first rest-lines)
+                next-line (:line next-item)]
+            (cond
+              ;; When inside a block, only check for the matching end
+              (and in-block
+                   block-type
+                   (re-matches (re-pattern (str "(?i)^\\s*#\\+END_" block-type "\\s*$")) line))
+              {:result (conj result current), :remaining rest-lines, :in-block false, :block-type nil}
+
+              ;; When inside a block, don't check for other patterns - just add the line
+              in-block
+              {:result (conj result current), :remaining rest-lines, :in-block true, :block-type block-type}
+
+              ;; Not in a block - check for block start
+              (when-let [[_ btype] (re-matches generic-block-begin-pattern line)]
+                btype)
+              (let [[_ btype] (re-matches generic-block-begin-pattern line)]
+                {:result (conj result current), :remaining rest-lines, :in-block true, :block-type btype})
+
+              ;; Normal line processing outside blocks
+              (or (nil? next-line) (not (should-append? line next-line false)))
+              {:result (conj result current), :remaining rest-lines, :in-block false, :block-type nil}
+
+              :else
+              (let [trimmed-next    (str/trim next-line)
+                    normalized-next (if (list-item? line)
+                                      (str/replace trimmed-next #"\s+" " ")
+                                      trimmed-next)
+                    new-line        (str line " " normalized-next)
+                    ;; Keep the original line number from current
+                    new-current     {:line new-line :num num}]
+                {:result result, :remaining (cons new-current (rest rest-lines)), :in-block false, :block-type nil})))))
+      {:result [], :remaining indexed, :in-block false, :block-type nil}
+      (range (count lines))))))
+
 (defn unwrap-text [input]
-  (let [lines (str/split-lines input)]
-    (str/join
-     "\n"
-     (:result
-      (reduce
-       (fn [{:keys [result in-block remaining] :as acc} _]
-         (if (empty? remaining)
-           acc
-           (let [current    (first remaining)
-                 rest-lines (rest remaining)
-                 next-line  (first rest-lines)]
-             (cond
-               (block-begin? current)
-               {:result (conj result current), :remaining rest-lines, :in-block true}
-
-               (block-end? current)
-               {:result (conj result current), :remaining rest-lines, :in-block false}
-
-               (or (nil? next-line) (not (should-append? current next-line in-block)))
-               {:result (conj result current), :remaining rest-lines, :in-block in-block}
-
-               :else
-               (let [trimmed-next    (str/trim next-line)
-                     normalized-next (if (list-item? current)
-                                       (str/replace trimmed-next #"\s+" " ")
-                                       trimmed-next)
-                     new-current     (str current " " normalized-next)]
-                 {:result result, :remaining (cons new-current (rest rest-lines)), :in-block in-block})))))
-       {:result [], :remaining lines, :in-block false}
-       (range (count lines)))))))
+  (str/join "\n" (map :line (unwrap-text-indexed input))))
 
 ;; Format Protection Framework
 
@@ -859,10 +910,12 @@
 
 (defn collect-list-item-body
   "Collect continuation lines for a list item until we hit another list item,
-   a headline, or a non-indented line. Returns [indexed-lines remaining]."
+   a headline, or a non-indented line (outside of blocks). Returns [indexed-lines remaining]."
   [indexed-lines min-indent]
   (loop [[{:keys [line]} & more :as remaining] indexed-lines
-         collected []]
+         collected []
+         in-block false
+         block-type nil]
     (cond
       (empty? remaining)
       [collected remaining]
@@ -870,11 +923,28 @@
       (nil? line)
       [collected remaining]
 
-      ;; Stop at headlines
-      (headline? line)
+      ;; Stop at headlines (but only outside blocks)
+      (and (not in-block) (headline? line))
       [collected remaining]
 
-      ;; Stop at list items (same or less indent)
+      ;; Track block start
+      (and (not in-block)
+           (when-let [[_ btype] (re-matches generic-block-begin-pattern line)]
+             btype))
+      (let [[_ btype] (re-matches generic-block-begin-pattern line)]
+        (recur more (conj collected (first remaining)) true btype))
+
+      ;; Track block end
+      (and in-block
+           block-type
+           (re-matches (re-pattern (str "(?i)^\\s*#\\+END_" block-type "\\s*$")) line))
+      (recur more (conj collected (first remaining)) false nil)
+
+      ;; Inside a block - always include the line
+      in-block
+      (recur more (conj collected (first remaining)) true block-type)
+
+      ;; Stop at list items (same or less indent) - only outside blocks
       (and (re-matches list-item-pattern line)
            (let [[_ indent _ _] (re-matches list-item-pattern line)]
              (<= (count indent) min-indent)))
@@ -882,13 +952,13 @@
 
       ;; Blank lines are included (they separate paragraphs)
       (str/blank? line)
-      (recur more (conj collected (first remaining)))
+      (recur more (conj collected (first remaining)) false nil)
 
       ;; Indented continuation lines (more than min-indent) are included
       (re-matches #"^\s+.*$" line)
-      (recur more (conj collected (first remaining)))
+      (recur more (conj collected (first remaining)) false nil)
 
-      ;; Non-indented non-blank line ends the item
+      ;; Non-indented non-blank line ends the item (only outside blocks)
       :else
       [collected remaining])))
 
@@ -1011,20 +1081,22 @@
             end-pattern (re-pattern (str "(?i)^\\s*#\\+END_" block-type "\\s*$"))
             make-block-node
             (fn [content & {:keys [warning]}]
-              (case block-type-lower
-                "src" (make-node
-                       :src-block
-                       :language (or (first (str/split (or args "") #"\s+")) "")
-                       :args args :content (str/join "\n" content) :line num
-                       :warning warning :error-line (when warning num))
-                "quote" (make-node
-                         :quote-block :content (str/join "\n" content) :line num
+              ;; Unescape comma-protected lines in the content
+              (let [unescaped-content (map unescape-comma content)]
+                (case block-type-lower
+                  "src" (make-node
+                         :src-block
+                         :language (or (first (str/split (or args "") #"\s+")) "")
+                         :args args :content (str/join "\n" unescaped-content) :line num
                          :warning warning :error-line (when warning num))
-                (make-node :block :block-type (keyword block-type-lower)
-                           :args (when args (str/trim args))
-                           :content (str/join "\n" content)
-                           :line num :warning warning
-                           :error-line (when warning num))))]
+                  "quote" (make-node
+                           :quote-block :content (str/join "\n" unescaped-content) :line num
+                           :warning warning :error-line (when warning num))
+                  (make-node :block :block-type (keyword block-type-lower)
+                             :args (when args (str/trim args))
+                             :content (str/join "\n" unescaped-content)
+                             :line num :warning warning
+                             :error-line (when warning num)))))]
         (loop [[{:keys [line]} & more :as remaining] (rest indexed-lines)
                content []]
           (cond
@@ -1236,9 +1308,10 @@
    (binding [*parse-errors* (atom [])]
      (let [;; First replace org entities, then optionally unwrap
            with-entities (replace-entities org-content)
-           processed-content (if unwrap? (unwrap-text with-entities) with-entities)
-           lines (str/split-lines processed-content)
-           indexed-lines (index-lines lines)
+           ;; Use unwrap-text-indexed to preserve original line numbers
+           indexed-lines (if unwrap?
+                           (unwrap-text-indexed with-entities)
+                           (index-lines (str/split-lines with-entities)))
            [meta rest-after-meta] (parse-metadata indexed-lines)
            title (get meta :title "Untitled Document")
            [top-level-content rest-after-content] (parse-content rest-after-meta)
@@ -1568,11 +1641,13 @@ li > p { margin-top: 0.5em; }
                       (str " class=\"language-" (escape-html (:language node)) "\""))
                     ">" (escape-html (:content node)) "</code></pre>")
          :org (let [lang (:language node)
-                    args (:args node)]
+                    args (:args node)
+                    ;; Re-escape lines that need comma protection
+                    escaped-content (escape-block-content (:content node))]
                 (str "#+BEGIN_SRC"
                      (when (non-blank? lang) (str " " lang))
                      (when (non-blank? args) (str " " args))
-                     "\n" (:content node) "\n#+END_SRC"))
+                     "\n" escaped-content "\n#+END_SRC"))
          (str "```" (or (:language node) "") "\n" (:content node) "\n```"))
 
        :quote-block
@@ -1582,7 +1657,7 @@ li > p { margin-top: 0.5em; }
                          (map #(str "<p>" (format-text-html %) "</p>"))
                          (str/join "\n"))
                     "\n</blockquote>")
-         :org (str "#+BEGIN_QUOTE\n" (:content node) "\n#+END_QUOTE")
+         :org (str "#+BEGIN_QUOTE\n" (escape-block-content (:content node)) "\n#+END_QUOTE")
          (str/join "\n" (map #(str "> " (format-text :md %)) (str/split-lines (:content node)))))
 
        :property-drawer
@@ -1625,11 +1700,12 @@ li > p { margin-top: 0.5em; }
                             (:content node)
                             (str "#+BEGIN_EXPORT"
                                  (when (non-blank? export-type) (str " " export-type))
-                                 "\n" (:content node) "\n#+END_EXPORT"))
-                  (let [args (:args node)]
+                                 "\n" (escape-block-content (:content node)) "\n#+END_EXPORT"))
+                  (let [args (:args node)
+                        escaped-content (escape-block-content (:content node))]
                     (str "#+BEGIN_" (upper-name block-type)
                          (when (non-blank? args) (str " " args))
-                         "\n" (:content node) "\n#+END_" (upper-name block-type))))
+                         "\n" escaped-content "\n#+END_" (upper-name block-type))))
            ;; markdown
            (case block-type
              :warning (str "> **Warning**\n" (str/join "\n" (map #(str "> " %) (str/split-lines (:content node)))))
