@@ -1673,6 +1673,18 @@ li > p { margin-top: 0.5em; }
     0
     (count (re-seq #"\S+" s))))
 
+(defn count-images
+  "Count image links in a string.
+   Matches [[path/to/image.png]] or [[path/to/image.png][description]]"
+  [s]
+  (if (or (nil? s) (str/blank? s))
+    0
+    (let [;; Find all org links: [[target]] or [[target][desc]]
+          links (re-seq #"\[\[([^\]]+)\](?:\[[^\]]*\])?\]" s)]
+      (count (filter (fn [[_ target]]
+                       (image-url? target))
+                     links)))))
+
 (defn collect-stats
   "Recursively collect statistics from AST nodes."
   [node]
@@ -1691,7 +1703,8 @@ li > p { margin-top: 0.5em; }
                                   (update :words (fnil + 0) (count-words (:title node))))
                      :paragraph (-> child-stats
                                     (update :paragraphs (fnil inc 0))
-                                    (update :words (fnil + 0) (count-words (:content node))))
+                                    (update :words (fnil + 0) (count-words (:content node)))
+                                    (update :images (fnil + 0) (count-images (:content node))))
                      :table (update child-stats :tables (fnil inc 0))
                      :list (update child-stats :lists (fnil inc 0))
                      :list-item (-> child-stats
@@ -1699,17 +1712,22 @@ li > p { margin-top: 0.5em; }
                                     (update :words (fnil + 0)
                                             (+ (count-words (:content node))
                                                (count-words (:term node))
-                                               (count-words (:definition node)))))
+                                               (count-words (:definition node))))
+                                    (update :images (fnil + 0)
+                                            (+ (count-images (:content node))
+                                               (count-images (:definition node)))))
                      :src-block (update child-stats :src-blocks (fnil inc 0))
                      :quote-block (-> child-stats
                                       (update :quote-blocks (fnil inc 0))
-                                      (update :words (fnil + 0) (count-words (:content node))))
+                                      (update :words (fnil + 0) (count-words (:content node)))
+                                      (update :images (fnil + 0) (count-images (:content node))))
                      :block (update child-stats :blocks (fnil inc 0))
                      :comment (update child-stats :comments (fnil inc 0))
                      :fixed-width (update child-stats :fixed-width (fnil inc 0))
                      :footnote-def (-> child-stats
                                        (update :footnotes (fnil inc 0))
-                                       (update :words (fnil + 0) (count-words (:content node))))
+                                       (update :words (fnil + 0) (count-words (:content node)))
+                                       (update :images (fnil + 0) (count-images (:content node))))
                      :html-line (update child-stats :html-lines (fnil inc 0))
                      :latex-line (update child-stats :latex-lines (fnil inc 0))
                      :property-drawer (update child-stats :property-drawers (fnil inc 0))
@@ -1722,7 +1740,7 @@ li > p { margin-top: 0.5em; }
   [ast]
   (let [raw-stats (collect-stats ast)
         ;; Define display order
-        ordered-keys [:sections :paragraphs :words :lists :list-items
+        ordered-keys [:sections :paragraphs :words :images :lists :list-items
                       :tables :src-blocks :quote-blocks :blocks
                       :footnotes :comments :fixed-width :html-lines
                       :latex-lines :property-drawers]
@@ -1743,6 +1761,7 @@ li > p { margin-top: 0.5em; }
   (let [label-map {:sections "Sections"
                    :paragraphs "Paragraphs"
                    :words "Words"
+                   :images "Images"
                    :lists "Lists"
                    :list-items "List items"
                    :tables "Tables"
