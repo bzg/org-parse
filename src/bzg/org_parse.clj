@@ -1191,80 +1191,81 @@
 (defn parse-content [indexed-lines]
   (loop [[{:keys [line]} & more :as remaining] indexed-lines
          nodes []
-         pending-affiliated nil]
+         pending-affiliated nil
+         trailing-blanks 0]
     (if (empty? remaining)
-      [nodes remaining]
+      [nodes remaining trailing-blanks]
       (cond
         (str/blank? line)
-        (recur more nodes pending-affiliated)
+        (recur more nodes pending-affiliated (inc trailing-blanks))
 
         (headline? line)
-        [nodes remaining]
+        [nodes remaining trailing-blanks]
 
         ;; Collect affiliated keywords (#+attr_html, #+caption, etc.)
         (affiliated-keyword? line)
         (let [[affiliated rest-lines] (parse-affiliated-keywords remaining)]
-          (recur rest-lines nodes affiliated))
+          (recur rest-lines nodes affiliated 0))
 
         (re-matches property-drawer-start-pattern line)
         (let [[_ properties rest-lines] (parse-property-drawer remaining)
               drawer-node (make-node :property-drawer :properties properties
                                      :line (:num (first remaining)))]
-          (recur rest-lines (conj nodes drawer-node) nil))
+          (recur rest-lines (conj nodes drawer-node) nil 0))
 
         (comment-line? line)
         (let [[rest-lines nodes'] (or (try-parse parse-comment remaining nodes)
                                       [more nodes])]
-          (recur rest-lines nodes' nil))
+          (recur rest-lines nodes' nil 0))
 
         (ignored-keyword-line? line)
-        (recur more nodes pending-affiliated)
+        (recur more nodes pending-affiliated 0)
 
         (fixed-width-line? line)
         (let [[rest-lines nodes'] (or (try-parse parse-fixed-width remaining nodes)
                                       [more nodes])]
-          (recur rest-lines nodes' nil))
+          (recur rest-lines nodes' nil 0))
 
         (html-line? line)
         (let [[rest-lines nodes'] (or (try-parse parse-html-lines remaining nodes)
                                       [more nodes])]
-          (recur rest-lines nodes' nil))
+          (recur rest-lines nodes' nil 0))
 
         (latex-line? line)
         (let [[rest-lines nodes'] (or (try-parse parse-latex-lines remaining nodes)
                                       [more nodes])]
-          (recur rest-lines nodes' nil))
+          (recur rest-lines nodes' nil 0))
 
         (footnote-def? line)
         (let [[rest-lines nodes'] (or (try-parse parse-footnote-definition remaining nodes)
                                       [more nodes])]
-          (recur rest-lines nodes' nil))
+          (recur rest-lines nodes' nil 0))
 
         (list-item? line)
         (let [[rest-lines nodes'] (or (if pending-affiliated
                                         (try-parse-with-affiliated process-list remaining nodes pending-affiliated)
                                         (try-parse process-list remaining nodes))
                                       [more nodes])]
-          (recur rest-lines nodes' nil))
+          (recur rest-lines nodes' nil 0))
 
         (table-line? line)
         (let [[rest-lines nodes'] (or (if pending-affiliated
                                         (try-parse-with-affiliated parse-table remaining nodes pending-affiliated)
                                         (try-parse parse-table remaining nodes))
                                       [more nodes])]
-          (recur rest-lines nodes' nil))
+          (recur rest-lines nodes' nil 0))
 
         (re-matches generic-block-begin-pattern line)
         (let [[rest-lines nodes'] (or (if pending-affiliated
                                         (try-parse-with-affiliated parse-block remaining nodes pending-affiliated)
                                         (try-parse parse-block remaining nodes))
                                       [more nodes])]
-          (recur rest-lines nodes' nil))
+          (recur rest-lines nodes' nil 0))
 
         :else
         (if-let [[paragraph rest-lines] (parse-paragraph remaining)]
-          (recur rest-lines (conj nodes (attach-affiliated paragraph pending-affiliated)) nil)
-          (recur more nodes nil))))))
+          (recur rest-lines (conj nodes (attach-affiliated paragraph pending-affiliated)) nil 0)
+          (recur more nodes nil 0))))))
 
 (defn update-path-stack [path-stack new-level title]
   (let [current-level (count path-stack)]
@@ -1273,22 +1274,39 @@
       (= new-level current-level) (conj (vec (butlast path-stack)) title)
       :else (conj (vec (take (dec new-level) path-stack)) title))))
 
+
 (defn parse-sections
   ([indexed-lines current-path]
-   (parse-sections indexed-lines current-path nil))
+   (parse-sections indexed-lines current-path nil 0))
   ([indexed-lines current-path parent-level]
+   (parse-sections indexed-lines current-path parent-level 0))
+  ([indexed-lines current-path parent-level initial-blanks-before]
    (loop [[{:keys [line num]} & more :as remaining] indexed-lines
-          sections [] path-stack current-path]
+          sections [] path-stack current-path
+          blanks-before initial-blanks-before]
      (if (empty? remaining)
        [sections remaining]
        (if-let [headline-data (parse-headline line)]
          (let [{:keys [level title todo priority tags]} headline-data]
            (if (and parent-level (<= level parent-level))
-             [sections remaining]
+             ;; Return to parent level - pass back the blanks-before count
+             ;; so parent can assign it to the next sibling
+             [sections remaining blanks-before]
              (let [new-path-stack                       (update-path-stack path-stack level title)
                    [_ properties rest-after-props]      (parse-property-drawer more)
-                   [content rest-after-content]         (parse-content rest-after-props)
-                   [subsections rest-after-subsections] (parse-sections rest-after-content new-path-stack level)
+                   ;; Count blank lines immediately after headline/properties (before content)
+                   [blanks-after-title rest-after-title-blanks]
+                   (loop [lines rest-after-props n 0]
+                     (if (and (seq lines) (str/blank? (:line (first lines))))
+                       (recur (rest lines) (inc n))
+                       [n lines]))
+                   [content rest-after-content content-trailing-blanks] (parse-content rest-after-title-blanks)
+                   ;; Use trailing blanks from content as blanks-before for subsections
+                   [subsections rest-after-subsections sub-trailing-blanks]
+                   (let [result (parse-sections rest-after-content new-path-stack level content-trailing-blanks)]
+                     (if (= 3 (count result))
+                       result
+                       [(first result) (second result) 0]))
                    new-section (make-node :section
                                           :level level
                                           :title title
@@ -1298,9 +1316,13 @@
                                           :properties properties
                                           :path new-path-stack
                                           :line num
-                                          :children (vec (concat content subsections)))]
-               (recur rest-after-subsections (conj sections new-section) path-stack))))
-         [sections remaining])))))
+                                          :blank-lines-before blanks-before
+                                          :blank-lines-after-title blanks-after-title
+                                          :children (vec (concat content subsections)))
+                   ;; Use trailing blanks from subsection parsing for next sibling
+                   next-blanks sub-trailing-blanks]
+               (recur rest-after-subsections (conj sections new-section) path-stack next-blanks))))
+         [sections remaining blanks-before])))))
 
 (defn parse-org
   ([org-content] (parse-org org-content {}))
@@ -1314,8 +1336,8 @@
                            (index-lines (str/split-lines with-entities)))
            [meta rest-after-meta] (parse-metadata indexed-lines)
            title (get meta :title "Untitled Document")
-           [top-level-content rest-after-content] (parse-content rest-after-meta)
-           [sections _] (parse-sections rest-after-content [])
+           [top-level-content rest-after-content content-trailing-blanks] (parse-content rest-after-meta)
+           [sections _ _] (parse-sections rest-after-content [] nil content-trailing-blanks)
            errors @*parse-errors*
            doc (make-node :document
                           :title title
@@ -1492,8 +1514,31 @@ li > p { margin-top: 0.5em; }
 (defn render-node
   ([node fmt] (render-node node fmt 0))
   ([node fmt level]
-   (let [children-join (if (= fmt :html) "\n" "\n\n")
-         render-children #(str/join children-join (remove str/blank? (map (fn [c] (render-node c fmt)) %)))]
+   (let [;; Smart join: sections handle their own spacing via blank-lines-before
+         render-children
+         (fn [children]
+           (let [indexed (map-indexed vector children)
+                 rendered (for [[i child] indexed
+                                :let [r (render-node child fmt)]
+                                :when (not (str/blank? r))]
+                            {:index i :type (:type child) :rendered r})]
+             (loop [items rendered
+                    result []]
+               (if (empty? items)
+                 (str/join "" result)
+                 (let [{:keys [type rendered]} (first items)
+                       is-first (empty? result)
+                       is-section (= type :section)]
+                   (recur (rest items)
+                          (conj result
+                                (cond
+                                  is-first rendered
+                                  ;; Sections: add newline to end previous line, then section adds its own blanks-before
+                                  is-section (str "\n" rendered)
+                                  ;; HTML uses single newline
+                                  (= fmt :html) (str "\n" rendered)
+                                  ;; Other elements: double newline
+                                  :else (str "\n\n" rendered)))))))))]
      (case (:type node)
        :document
        (case fmt
@@ -1550,24 +1595,30 @@ li > p { margin-top: 0.5em; }
                       todo-html priority-html (format-text-html (:title node)) tags-html
                       "</" tag ">\n"
                       (render-children (:children node)) "\n</section>"))
-         :org (let [stars (repeat-str (:level node) "*")
+         :org (let [blanks-before (repeat-str (or (:blank-lines-before node) 0) "\n")
+                    blanks-after-title (repeat-str (or (:blank-lines-after-title node) 0) "\n")
+                    stars (repeat-str (:level node) "*")
                     todo-str (when (:todo node) (str (name (:todo node)) " "))
                     priority-str (when (:priority node) (str "[#" (:priority node) "] "))
                     tags-str (when (seq (:tags node)) (str " :" (str/join ":" (:tags node)) ":"))
                     props-str (render-properties-org (:properties node))
                     children-str (render-children (:children node))]
-                (str stars " " todo-str priority-str (:title node) tags-str
+                (str blanks-before
+                     stars " " todo-str priority-str (:title node) tags-str
                      (when props-str (str "\n" props-str))
+                     blanks-after-title
                      (when (seq children-str) (str "\n" children-str))))
          ;; default: markdown
-         (let [todo-str (when (:todo node) (str "**" (name (:todo node)) "** "))
+         (let [blanks-before (repeat-str (or (:blank-lines-before node) 0) "\n")
+               blanks-after-title (repeat-str (or (:blank-lines-after-title node) 0) "\n")
+               todo-str (when (:todo node) (str "**" (name (:todo node)) "** "))
                priority-str (when (:priority node) (str "[#" (:priority node) "] "))
                tags-str (when (seq (:tags node)) (str " `:" (str/join ":" (:tags node)) ":`"))
                heading (str (repeat-str (:level node) "#") " "
                             todo-str priority-str
                             (format-text :md (:title node))
                             tags-str)]
-           (str heading "\n" (render-children (:children node)))))
+           (str blanks-before heading "\n" blanks-after-title (render-children (:children node)))))
 
        :paragraph
        (case fmt
