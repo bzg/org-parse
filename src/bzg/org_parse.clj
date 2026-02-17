@@ -1866,8 +1866,8 @@ li > p { margin-top: 0.5em; }
     :default "json" :validate [#{"json" "edn" "yaml" "org"} "Must be: json, edn, yaml, org"]]
    ["-r" "--render FORMAT" "Content rendering format: md, html, or org"
     :default "md" :validate [#{"md" "html" "org"} "Must be: md, html, org"]]
-   ["-e" "--export FORMAT" "Export document to markdown, html, or org"
-    :validate [#{"markdown" "html" "org"} "Must be: markdown, html, org"]]
+   ["-e" "--export FORMAT" "Export document to md, html, or org"
+    :validate [#{"md" "html" "org"} "Must be: md, html, org"]]
    ["-s" "--stats" "Compute and display document statistics"]
    ["-n" "--no-unwrap" "Preserve original line breaks"]
    ["-t" "--title REGEX" "Filter: section title matches" :parse-fn re-pattern]
@@ -1945,7 +1945,7 @@ li > p { margin-top: 0.5em; }
 
               export-doc
               (case export-doc
-                "markdown" (println (render-ast-as-markdown cleaned-ast))
+                "md" (println (render-ast-as-markdown cleaned-ast))
                 "html" (println (render-ast-as-html cleaned-ast))
                 "org" (println (render-ast-as-org cleaned-ast)))
 
