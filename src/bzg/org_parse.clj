@@ -1478,17 +1478,31 @@ li > p { margin-top: 0.5em; }
   (if (empty? rows) ""
       (let [format-cell #(format-text fmt %)
             formatted-rows (mapv (fn [row] (mapv format-cell row)) rows)
-            col-widths (when (seq formatted-rows)
-                         (apply mapv (fn [& cells] (apply max min-table-cell-width (map count cells)))
-                                formatted-rows))
+            ;; Find max number of columns across all rows
+            max-cols (apply max 0 (map count formatted-rows))
+            ;; Pad rows to have same number of columns
+            padded-rows (mapv (fn [row]
+                                (let [missing (- max-cols (count row))]
+                                  (if (pos? missing)
+                                    (into row (repeat missing ""))
+                                    row)))
+                              formatted-rows)
+            ;; Now calculate col-widths safely
+            col-widths (when (and (seq padded-rows) (pos? max-cols))
+                         (apply mapv (fn [& cells]
+                                       (apply max min-table-cell-width (map count cells)))
+                                padded-rows))
             pad-cell (fn [cell width] (str cell (repeat-str (- width (count cell)) " ")))
             format-row (fn [row]
-                         (str "| " (str/join " | " (map-indexed #(pad-cell %2 (nth col-widths %1)) row)) " |"))
-            separator (str "|-" (str/join (if (= fmt :org) "-+-" "-|-") (map #(repeat-str % "-") col-widths)) "-|")]
-        (if has-header
-          (str (format-row (first formatted-rows)) "\n" separator "\n"
-               (str/join "\n" (map format-row (rest formatted-rows))))
-          (str/join "\n" (map format-row formatted-rows))))))
+                         (str "| " (str/join " | " (map-indexed #(pad-cell %2 (nth col-widths %1 min-table-cell-width)) row)) " |"))
+            separator (when (seq col-widths)
+                        (str "|-" (str/join (if (= fmt :org) "-+-" "-|-") (map #(repeat-str % "-") col-widths)) "-|"))]
+        (if (nil? col-widths)
+          ""
+          (if has-header
+            (str (format-row (first padded-rows)) "\n" separator "\n"
+                 (str/join "\n" (map format-row (rest padded-rows))))
+            (str/join "\n" (map format-row padded-rows)))))))
 
 (declare render-node)
 
