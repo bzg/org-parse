@@ -12,13 +12,11 @@
             [clj-yaml.core :as yaml]))
 
 ;; Constants
-
 (def min-table-cell-width 3)
 (def list-indent-width 2)
 (def max-heading-level 6)
 
 ;; Error/Warning Accumulator
-
 (def ^:dynamic *parse-errors* (atom []))
 
 (defn add-parse-error! [line-num message]
@@ -67,6 +65,9 @@
 (def link-without-desc-pattern #"\[\[([^\]]+)\]\]")
 (def link-type-pattern #"^(file|id|mailto|http|https|ftp|news|shell|elisp|doi):(.*)$")
 (def affiliated-keyword-pattern #"(?i)^\s*#\+(attr_\w+|caption|name|header|results):\s*(.*)$")
+(def unordered-list-pattern #"^\s*[-+*]\s+.*$")
+(def ordered-list-pattern #"^\s*\d+[.)]\s+.*$")
+(def list-item-simple-pattern #"^\s*(?:[-+*]|\d+[.)])\s+.*$")
 
 (def rendering-keywords
   #{"title" "author" "date" "subtitle" "email" "language"
@@ -96,8 +97,8 @@
 (defn table-line? [line] (re-matches table-pattern line))
 (defn block-begin? [line] (re-matches block-begin-pattern line))
 (defn block-end? [line] (re-matches block-end-pattern line))
-(defn unordered-list-item? [line] (re-matches #"^\s*[-+*]\s+.*$" line))
-(defn ordered-list-item? [line] (re-matches #"^\s*\d+[.)]\s+.*$" line))
+(defn unordered-list-item? [line] (re-matches unordered-list-pattern line))
+(defn ordered-list-item? [line] (re-matches ordered-list-pattern line))
 (defn footnote-def? [line] (re-matches footnote-def-pattern line))
 (defn html-line? [line] (re-matches html-line-pattern line))
 (defn latex-line? [line] (re-matches latex-line-pattern line))
@@ -105,7 +106,7 @@
   (or (re-matches property-drawer-start-pattern line)
       (re-matches property-drawer-end-pattern line)
       (re-matches property-pattern line)))
-(defn list-item? [line] (or (unordered-list-item? line) (ordered-list-item? line)))
+(defn list-item? [line] (re-matches list-item-simple-pattern line))
 (defn continuation-line? [line] (and (re-matches continuation-pattern line) (not (list-item? line))))
 (defn affiliated-keyword? [line] (re-matches affiliated-keyword-pattern line))
 (defn index-lines [lines] (map-indexed (fn [i line] {:line line :num (inc i)}) lines))
@@ -143,7 +144,6 @@
        (str/join "\n")))
 
 ;; Text Unwrapping
-
 (defn hard-break? [current-line next-line in-block]
   (or in-block
       (str/blank? current-line)
@@ -166,7 +166,6 @@
            (list-item? next-line))))
 
 ;; Org entities - maps \name to Unicode/ASCII equivalent
-;; Based on org-entities from Org mode
 (def org-entities
   {"\\alpha" "α"
    "\\beta" "β"
@@ -352,7 +351,6 @@
   (str/join "\n" (map :line (unwrap-text-indexed input))))
 
 ;; Format Protection Framework
-
 (defn protect-patterns [text patterns]
   (let [counter     (atom 0)
         all-matches (atom {})
@@ -452,11 +450,12 @@
 (defn has-affiliated-keywords?
   "Check if the affiliated map contains any actual content."
   [affiliated]
-  (or (seq (:caption affiliated))
-      (seq (:name affiliated))
-      (seq (:attr affiliated))
-      (some #(and (not= % :attr) (seq (get affiliated %)))
-            (keys affiliated))))
+  (some (fn [[k v]]
+          (cond
+            (= k :attr) (and (map? v) (seq v))  ; :attr is a nested map
+            (string? v) (not (str/blank? v))
+            :else (seq v)))
+        affiliated))
 
 (defn attach-affiliated
   "Attach affiliated keywords to a node if present."
@@ -1793,6 +1792,7 @@ li > p { margin-top: 0.5em; }
   (yaml/generate-string ast {:dumper-options {:flow-style :block}}))
 
 ;; Statistics
+
 (defn count-words
   "Count words in a string."
   [s]
@@ -1812,6 +1812,12 @@ li > p { margin-top: 0.5em; }
                        (image-url? target))
                      links)))))
 
+(defn- content-stats
+  "Extract word and image counts from a node's :content field."
+  [node]
+  {:words (count-words (:content node))
+   :images (count-images (:content node))})
+
 (defn collect-stats
   "Recursively collect statistics from AST nodes."
   [node]
@@ -1828,10 +1834,11 @@ li > p { margin-top: 0.5em; }
                      :section (-> child-stats
                                   (update :sections (fnil inc 0))
                                   (update :words (fnil + 0) (count-words (:title node))))
-                     :paragraph (-> child-stats
-                                    (update :paragraphs (fnil inc 0))
-                                    (update :words (fnil + 0) (count-words (:content node)))
-                                    (update :images (fnil + 0) (count-images (:content node))))
+                     :paragraph (let [{:keys [words images]} (content-stats node)]
+                                  (-> child-stats
+                                      (update :paragraphs (fnil inc 0))
+                                      (update :words (fnil + 0) words)
+                                      (update :images (fnil + 0) images)))
                      :table (update child-stats :tables (fnil inc 0))
                      :list (update child-stats :lists (fnil inc 0))
                      :list-item (-> child-stats
@@ -1844,17 +1851,19 @@ li > p { margin-top: 0.5em; }
                                             (+ (count-images (:content node))
                                                (count-images (:definition node)))))
                      :src-block (update child-stats :src-blocks (fnil inc 0))
-                     :quote-block (-> child-stats
-                                      (update :quote-blocks (fnil inc 0))
-                                      (update :words (fnil + 0) (count-words (:content node)))
-                                      (update :images (fnil + 0) (count-images (:content node))))
+                     :quote-block (let [{:keys [words images]} (content-stats node)]
+                                    (-> child-stats
+                                        (update :quote-blocks (fnil inc 0))
+                                        (update :words (fnil + 0) words)
+                                        (update :images (fnil + 0) images)))
                      :block (update child-stats :blocks (fnil inc 0))
                      :comment (update child-stats :comments (fnil inc 0))
                      :fixed-width (update child-stats :fixed-width (fnil inc 0))
-                     :footnote-def (-> child-stats
-                                       (update :footnotes (fnil inc 0))
-                                       (update :words (fnil + 0) (count-words (:content node)))
-                                       (update :images (fnil + 0) (count-images (:content node))))
+                     :footnote-def (let [{:keys [words images]} (content-stats node)]
+                                     (-> child-stats
+                                         (update :footnotes (fnil inc 0))
+                                         (update :words (fnil + 0) words)
+                                         (update :images (fnil + 0) images)))
                      :html-line (update child-stats :html-lines (fnil inc 0))
                      :latex-line (update child-stats :latex-lines (fnil inc 0))
                      :property-drawer (update child-stats :property-drawers (fnil inc 0))
@@ -1882,32 +1891,36 @@ li > p { margin-top: 0.5em; }
                              (compare ia' ib'))))
           present-stats)))
 
+(def ^:private stats-label-map
+  {:sections "Sections"
+   :paragraphs "Paragraphs"
+   :words "Words"
+   :images "Images"
+   :lists "Lists"
+   :list-items "List items"
+   :tables "Tables"
+   :src-blocks "Source blocks"
+   :quote-blocks "Quote blocks"
+   :blocks "Other blocks"
+   :footnotes "Footnotes"
+   :comments "Comments"
+   :fixed-width "Fixed-width blocks"
+   :html-lines "HTML lines"
+   :latex-lines "LaTeX lines"
+   :property-drawers "Property drawers"})
+
 (defn format-stats
   "Format statistics for display."
   [stats]
-  (let [label-map {:sections "Sections"
-                   :paragraphs "Paragraphs"
-                   :words "Words"
-                   :images "Images"
-                   :lists "Lists"
-                   :list-items "List items"
-                   :tables "Tables"
-                   :src-blocks "Source blocks"
-                   :quote-blocks "Quote blocks"
-                   :blocks "Other blocks"
-                   :footnotes "Footnotes"
-                   :comments "Comments"
-                   :fixed-width "Fixed-width blocks"
-                   :html-lines "HTML lines"
-                   :latex-lines "LaTeX lines"
-                   :property-drawers "Property drawers"}
-        max-label-len (apply max (map #(count (get label-map % (name %))) (keys stats)))]
-    (str/join "\n"
-              (map (fn [[k v]]
-                     (let [label (get label-map k (name k))
-                           padding (apply str (repeat (- max-label-len (count label)) " "))]
-                       (str label ": " padding v)))
-                   stats))))
+  (let [max-label-len (->> (keys stats)
+                           (map #(count (get stats-label-map % (name %))))
+                           (apply max 0))]
+    (->> stats
+         (map (fn [[k v]]
+                (let [label (get stats-label-map k (name k))
+                      padding (apply str (repeat (- max-label-len (count label)) " "))]
+                  (str label ": " padding v))))
+         (str/join "\n"))))
 
 ;; CLI Options
 
