@@ -1913,12 +1913,10 @@ li > p { margin-top: 0.5em; }
 
 (def cli-options
   [["-h" "--help" "Show help"]
-   ["-f" "--format FORMAT" "Output: json, edn, yaml, or org"
-    :default "json" :validate [#{"json" "edn" "yaml" "org"} "Must be: json, edn, yaml, org"]]
-   ["-r" "--render FORMAT" "Content rendering format: md, html, or org"
+   ["-f" "--format FORMAT" "Output format: json, edn, yaml, md, html, or org"
+    :default "json" :validate [#{"json" "edn" "yaml" "md" "html" "org"} "Must be: json, edn, yaml, md, html, org"]]
+   ["-r" "--render FORMAT" "Content rendering format in AST output: md, html, or org"
     :default "md" :validate [#{"md" "html" "org"} "Must be: md, html, org"]]
-   ["-e" "--export FORMAT" "Export document to md, html, or org"
-    :validate [#{"md" "html" "org"} "Must be: md, html, org"]]
    ["-s" "--stats" "Compute and display document statistics"]
    ["-n" "--no-unwrap" "Preserve original line breaks"]
    ["-t" "--title REGEX" "Filter: section title matches" :parse-fn re-pattern]
@@ -1979,10 +1977,9 @@ li > p { margin-top: 0.5em; }
                              :section-title-pattern (:section-title options)
                              :section-id-pattern (:section-id options)}
                 filtered-ast (filter-ast ast filter-opts)
-                export-doc (:export options)
                 output-format (:format options)
                 render-format (keyword (:render options))
-                is-org-output (or (= export-doc "org") (= output-format "org"))
+                is-org-output (= output-format "org")
                 cleaned-ast (if is-org-output filtered-ast (clean-ast filtered-ast))]
             ;; Report parse errors to stderr if any
             (when-let [errs (:parse-errors cleaned-ast)]
@@ -1994,11 +1991,11 @@ li > p { margin-top: 0.5em; }
               (let [stats (compute-stats filtered-ast)]
                 (println (format-stats stats)))
 
-              export-doc
-              (case export-doc
-                "md" (println (render-ast-as-markdown cleaned-ast))
-                "html" (println (render-ast-as-html cleaned-ast))
-                "org" (println (render-ast-as-org cleaned-ast)))
+              (= output-format "md")
+              (println (render-ast-as-markdown cleaned-ast))
+
+              (= output-format "html")
+              (println (render-ast-as-html cleaned-ast))
 
               (= output-format "org")
               (println (render-ast-as-org cleaned-ast))

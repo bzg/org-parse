@@ -1,18 +1,17 @@
 #+title: Org parse
 
-Take an Org file and output it as data in json/yaml/edn/org format.
+Take an Org file and output it as data in json/yaml/edn format, or export it to md/html/org.
 
 * Usage examples
 
 :   org-parse notes.org                       # Output JSON with content rendered as Markdown
 :   org-parse -f edn notes.org                # Output in EDN format
 :   org-parse -f yaml notes.org               # Output in YAML format
-:   org-parse -f org notes.org                # Output in Org format (unwrapped)
+:   org-parse -f md notes.org                 # Export as Markdown
+:   org-parse -f html notes.org               # Export as HTML
+:   org-parse -f org notes.org                # Export as Org (unwrapped)
 :   org-parse -r html notes.org               # Render content as HTML in JSON output
 :   org-parse -r org notes.org                # Keep content as Org in JSON output
-:   org-parse -e markdown notes.org           # Export full document as Markdown
-:   org-parse -e html notes.org               # Export full document as HTML
-:   org-parse -e org notes.org                # Export full document as Org
 :   org-parse -n notes.org                    # Preserve original line breaks (no unwrap)
 :   org-parse -m 2 notes.org                  # Filter: headlines with level <= 2
 :   org-parse -M 2 notes.org                  # Filter: headlines with level >= 2
@@ -61,3 +60,4 @@ donation to [[https://www.clojuriststogether.org][clojuriststogether.org]].
 * License
 
 The code in this repository is licensed under [[LICENSES/EPL-2.0.txt][EPL-2.0]].
+
