@@ -325,25 +325,19 @@
               in-block
               {:result (conj result current), :remaining rest-lines, :in-block true, :block-type block-type}
 
-              ;; Not in a block - check for block start
-              (when-let [[_ btype] (re-matches generic-block-begin-pattern line)]
-                btype)
-              (let [[_ btype] (re-matches generic-block-begin-pattern line)]
-                {:result (conj result current), :remaining rest-lines, :in-block true, :block-type btype})
-
-              ;; Normal line processing outside blocks
-              (or (nil? next-line) (not (should-append? line next-line false)))
-              {:result (conj result current), :remaining rest-lines, :in-block false, :block-type nil}
-
+              ;; Not in a block - check for block start, then process normally
               :else
-              (let [trimmed-next    (str/trim next-line)
-                    normalized-next (if (list-item? line)
-                                      (str/replace trimmed-next #"\s+" " ")
-                                      trimmed-next)
-                    new-line        (str line " " normalized-next)
-                    ;; Keep the original line number from current
-                    new-current     {:line new-line :num num}]
-                {:result result, :remaining (cons new-current (rest rest-lines)), :in-block false, :block-type nil})))))
+              (if-let [[_ btype] (re-matches generic-block-begin-pattern line)]
+                {:result (conj result current), :remaining rest-lines, :in-block true, :block-type btype}
+                (if (or (nil? next-line) (not (should-append? line next-line false)))
+                  {:result (conj result current), :remaining rest-lines, :in-block false, :block-type nil}
+                  (let [trimmed-next    (str/trim next-line)
+                        normalized-next (if (list-item? line)
+                                          (str/replace trimmed-next #"\s+" " ")
+                                          trimmed-next)
+                        new-line        (str line " " normalized-next)
+                        new-current     {:line new-line :num num}]
+                    {:result result, :remaining (cons new-current (rest rest-lines)), :in-block false, :block-type nil})))))))
       {:result [], :remaining indexed, :in-block false, :block-type nil}
       (range (count lines))))))
 
@@ -395,7 +389,6 @@
       {:type (keyword t) :target target}
       {:type :external :target s})))
 
-;; Parse Org-style attribute syntax: :key value :key2 "quoted value"
 (defn parse-attr-string
   "Parse an Org attribute string like ':width 300 :alt \"An image\" :class my-class'
    into a map {:width \"300\" :alt \"An image\" :class \"my-class\"}"
@@ -415,7 +408,6 @@
             (recur rest result)
             result))))))
 
-;; Parse affiliated keywords and attach to following element
 (defn parse-affiliated-keywords
   "Collect consecutive affiliated keyword lines (#+attr_html, #+caption, etc.)
    Returns [affiliated-map remaining-lines] where affiliated-map has:
@@ -469,7 +461,6 @@
     node))
 
 ;; Text Formatting
-
 (def format-patterns
   {:bold      #"(?<![^\s\p{Punct}])\*([^\*\s](?:[^\*]*[^\*\s])?)\*(?![^\s\p{Punct}])"
    :italic    #"(?<![^\s\p{Punct}])/([^/\s](?:[^/]*[^/\s])?)/(?![^\s\p{Punct}])"
@@ -600,19 +591,37 @@
       str/trim
       (str/replace #"\s+" "-")))   ; Replace spaces with hyphens
 
+(defn- resolve-href
+  "Resolve a link target to a URL string given its type."
+  [link-type target url]
+  (case link-type
+    :file          target
+    (:id
+     :custom-id)  (str "#" target)
+    :heading       (str "#" (heading-to-slug target))
+    :mailto        (str "mailto:" target)
+    url))
+
+(defn- resolve-display
+  "Resolve the display text for a link, given an optional explicit description."
+  [link-type target url desc]
+  (or desc (case link-type
+             :heading   target
+             :custom-id target
+             url)))
+
 (defn format-link
   "Format an org link to the specified format.
    Optionally accepts affiliated keywords for enhanced image rendering."
   ([fmt match] (format-link fmt match nil))
   ([fmt [_ url desc] affiliated]
-   (let [parsed (parse-link url)
-         link-type (:type parsed)
-         target (:target parsed)
-         ;; For file: links, target is the path; for http(s), url is the full URL
-         actual-url (if (#{:http :https} link-type) url target)
+   (let [parsed      (parse-link url)
+         link-type   (:type parsed)
+         target      (:target parsed)
+         actual-url  (if (#{:http :https} link-type) url target)
          is-local-file (= link-type :file)
-         is-remote (#{:http :https} link-type)
-         url-is-image (image-url? actual-url)
+         is-remote   (#{:http :https} link-type)
+         url-is-image  (image-url? actual-url)
          desc-is-image (and desc (or (image-url? desc) (remote-url? desc)))]
      (cond
        ;; Local file images: convert to base64 data URI
@@ -628,82 +637,47 @@
            (= fmt :md)
            (str "![" (or desc target) "](" data-uri ")")
            :else "")
-         ;; File not found or error: return empty string
          "")
 
        ;; HTML format
        (= fmt :html)
        (cond
-         ;; Remote image URL without description: inline image
          (and is-remote url-is-image (nil? desc))
          (if affiliated
            (render-image-html url url affiliated)
            (str "<img src=\"" (escape-html url) "\" alt=\"" (escape-html url) "\">"))
 
-         ;; Remote image URL with text description: inline image with alt
          (and is-remote url-is-image desc (not desc-is-image))
          (if affiliated
            (render-image-html url desc affiliated)
            (str "<img src=\"" (escape-html url) "\" alt=\"" (escape-html desc) "\">"))
 
-         ;; Remote URL with description that is an image URL: clickable image button
          (and is-remote desc-is-image)
          (str "<a href=\"" (escape-html url) "\"><img src=\"" (escape-html desc) "\" alt=\"" (escape-html desc) "\"></a>")
 
-         ;; Default: regular link
          :else
-         (let [href (case link-type
-                      :file target
-                      :id (str "#" target)
-                      :custom-id (str "#" target)
-                      :heading (str "#" (heading-to-slug target))
-                      :mailto (str "mailto:" target)
-                      (escape-html url))
-               display (or desc (case link-type
-                                  :heading target
-                                  :custom-id target
-                                  (escape-html url)))]
+         (let [href    (resolve-href link-type target (escape-html url))
+               display (resolve-display link-type target (escape-html url) desc)]
            (str "<a href=\"" href "\">" display "</a>")))
 
        ;; Markdown format
        (= fmt :md)
        (cond
-         ;; Remote image URL without description: inline image
          (and is-remote url-is-image (nil? desc))
          (str "![" url "](" url ")")
 
-         ;; Remote URL with description that is an image URL: linked image
          (and is-remote desc-is-image)
          (str "[![" desc "](" desc ")](" url ")")
 
-         ;; Default: regular link
          :else
-         (let [href (case link-type
-                      :file target
-                      :id (str "#" target)
-                      :custom-id (str "#" target)
-                      :heading (str "#" (heading-to-slug target))
-                      :mailto (str "mailto:" target)
-                      url)
-               display (or desc (case link-type
-                                  :heading target
-                                  :custom-id target
-                                  url))]
+         (let [href    (resolve-href link-type target url)
+               display (resolve-display link-type target url desc)]
            (str "[" display "](" href ")")))
 
-       ;; Other formats (org): preserve as-is or default behavior
+       ;; Other formats (org)
        :else
-       (let [href (case link-type
-                    :file target
-                    :id (str "#" target)
-                    :custom-id (str "#" target)
-                    :heading (str "#" (heading-to-slug target))
-                    :mailto (str "mailto:" target)
-                    url)
-             display (or desc (case link-type
-                                :heading target
-                                :custom-id target
-                                url))]
+       (let [href    (resolve-href link-type target url)
+             display (resolve-display link-type target url desc)]
          (str "[" display "](" href ")"))))))
 
 (def md-format-replacements
@@ -719,8 +693,7 @@
           text replacements))
 
 (defn format-text-markdown [text]
-  (if (or (nil? text) (str/blank? text))
-    ""
+  (if (non-blank? text)
     (let [;; First, protect existing markdown links and code
           [protected restore] (protect-patterns text [[#"\[[^\]]+\]\([^)]+\)" "MD-LINK-"]
                                                       [#"`[^`]+`" "MD-CODE-"]])
@@ -734,7 +707,8 @@
           formatted (-> link-protected
                         (apply-format-patterns md-format-replacements)
                         (str/replace footnote-ref-pattern "[^$1]"))]
-      (restore (link-restore formatted)))))
+      (restore (link-restore formatted)))
+    ""))
 
 (defn format-footnote-html
   "Format a footnote reference or inline footnote to HTML.
@@ -753,8 +727,7 @@
         full))))
 
 (defn format-text-html [text]
-  (if (or (nil? text) (str/blank? text))
-    ""
+  (if (non-blank? text)
     (let [;; First protect macros and org links before escaping HTML
           ;; Macro pattern must come first: {{{name(args)}}} where args can contain anything
           [protected-content restore-content] (protect-patterns text [[#"\{\{\{.+?\}\}\}" "ORG-MACRO-"]
@@ -780,7 +753,8 @@
                         ;; Handle inline footnotes first (they have :content), then regular refs
                         (str/replace footnote-inline-pattern format-footnote-html)
                         (str/replace footnote-ref-pattern format-footnote-html))]
-      (restore formatted))))
+      (restore formatted))
+    ""))
 
 (defn extract-single-image-link
   "If text contains exactly one org link and it's an image, return [url desc].
@@ -822,7 +796,6 @@
   (boolean (re-matches #"\d+[.)]" marker)))
 
 ;; Parsing Functions
-
 (defn parse-headline [line]
   (if-let [[_ stars todo priority title tags] (re-matches headline-full-pattern line)]
     {:level (count stars)
@@ -928,8 +901,7 @@
 
       ;; Track block start
       (and (not in-block)
-           (when-let [[_ btype] (re-matches generic-block-begin-pattern line)]
-             btype))
+           (if-let [[_ btype] (re-matches generic-block-begin-pattern line)] btype false))
       (let [[_ btype] (re-matches generic-block-begin-pattern line)]
         (recur more (conj collected (first remaining)) true btype))
 
@@ -973,22 +945,17 @@
           [(flush-item items current-item) remaining]
 
           ;; New list item at same indent level with same marker type
-          (when-let [[_ indent marker content] (re-matches list-item-pattern line)]
+          (when-let [[_ indent marker _] (re-matches list-item-pattern line)]
             (and (= (count indent) initial-indent)
                  (= (normalize-marker marker) normalized-initial)
-                 ;; After a blank line, only continue if it's clearly a list continuation
-                 ;; (not a headline-like pattern at column 0)
                  (not (and after-blank (= initial-indent 0) (= marker "*")))))
-          (let [[_ indent marker content] (re-matches list-item-pattern line)
+          (let [[_ _indent marker content] (re-matches list-item-pattern line)
                 desc-item (parse-description-item content)
-                ;; Collect body lines for this item
                 [body-lines rest-after-body] (collect-list-item-body more initial-indent)
-                ;; Check if definition is empty and first body line should be the definition
                 [definition body-for-parsing]
                 (if (and desc-item
                          (str/blank? (:definition desc-item))
                          (seq body-lines))
-                  ;; Find first non-blank, non-ignored line as definition
                   (let [first-content (->> body-lines
                                            (drop-while #(or (str/blank? (:line %))
                                                             (ignored-keyword-line? (:line %))))
@@ -999,7 +966,6 @@
                                               (ignored-keyword-line? (:line %))) body-lines))]
                       ["" body-lines]))
                   [(or (:definition desc-item) "") body-lines])
-                ;; Parse the body lines as content
                 [children _] (if (seq body-for-parsing)
                                (parse-content body-for-parsing)
                                [[] []])
@@ -1020,7 +986,7 @@
                    false))
 
           ;; Nested list item (deeper indent) - starts a new sublist with its own marker
-          (when-let [[_ indent marker content] (re-matches list-item-pattern line)]
+          (when-let [[_ indent _ _] (re-matches list-item-pattern line)]
             (> (count indent) initial-indent))
           (if current-item
             (let [[_ indent marker _] (re-matches list-item-pattern line)
@@ -1187,6 +1153,13 @@
   (when-let [[node rest-lines] (parser remaining)]
     [rest-lines (conj nodes (attach-affiliated node affiliated))]))
 
+(def ^:private simple-line-parsers
+  [[comment-line?     parse-comment]
+   [fixed-width-line? parse-fixed-width]
+   [html-line?        parse-html-lines]
+   [latex-line?       parse-latex-lines]
+   [footnote-def?     parse-footnote-definition]])
+
 (defn parse-content [indexed-lines]
   (loop [[{:keys [line]} & more :as remaining] indexed-lines
          nodes []
@@ -1212,31 +1185,13 @@
                                      :line (:num (first remaining)))]
           (recur rest-lines (conj nodes drawer-node) nil 0))
 
-        (comment-line? line)
-        (let [[rest-lines nodes'] (or (try-parse parse-comment remaining nodes)
-                                      [more nodes])]
-          (recur rest-lines nodes' nil 0))
-
         (ignored-keyword-line? line)
         (recur more nodes pending-affiliated 0)
 
-        (fixed-width-line? line)
-        (let [[rest-lines nodes'] (or (try-parse parse-fixed-width remaining nodes)
-                                      [more nodes])]
-          (recur rest-lines nodes' nil 0))
-
-        (html-line? line)
-        (let [[rest-lines nodes'] (or (try-parse parse-html-lines remaining nodes)
-                                      [more nodes])]
-          (recur rest-lines nodes' nil 0))
-
-        (latex-line? line)
-        (let [[rest-lines nodes'] (or (try-parse parse-latex-lines remaining nodes)
-                                      [more nodes])]
-          (recur rest-lines nodes' nil 0))
-
-        (footnote-def? line)
-        (let [[rest-lines nodes'] (or (try-parse parse-footnote-definition remaining nodes)
+        ;; Simple parsers: no affiliated keyword
+        (some (fn [[pred _]] (when (pred line) pred)) simple-line-parsers)
+        (let [[_ parser] (some (fn [pair] (when ((first pair) line) pair)) simple-line-parsers)
+              [rest-lines nodes'] (or (try-parse parser remaining nodes)
                                       [more nodes])]
           (recur rest-lines nodes' nil 0))
 
@@ -1438,7 +1393,6 @@
 (defn clean-ast [ast] (clean-node ast))
 
 ;; Unified Renderer
-
 (def html-styles
   "body { font-family: sans-serif; line-height: 1.6; margin: 2em auto; max-width: 800px; padding: 0 1em; }
 h1, h2, h3, h4, h5, h6 { line-height: 1.2; }
@@ -1806,25 +1760,19 @@ li > p { margin-top: 0.5em; }
   (yaml/generate-string ast {:dumper-options {:flow-style :block}}))
 
 ;; Statistics
-
 (defn count-words
   "Count words in a string."
   [s]
-  (if (or (nil? s) (str/blank? s))
-    0
-    (count (re-seq #"\S+" s))))
+  (if (non-blank? s) (count (re-seq #"\S+" s)) 0))
 
 (defn count-images
   "Count image links in a string.
    Matches [[path/to/image.png]] or [[path/to/image.png][description]]"
   [s]
-  (if (or (nil? s) (str/blank? s))
-    0
-    (let [;; Find all org links: [[target]] or [[target][desc]]
-          links (re-seq #"\[\[([^\]]+)\](?:\[[^\]]*\])?\]" s)]
-      (count (filter (fn [[_ target]]
-                       (image-url? target))
-                     links)))))
+  (if (non-blank? s)
+    (let [links (re-seq #"\[\[([^\]]+)\](?:\[[^\]]*\])?\]" s)]
+      (count (filter (fn [[_ target]] (image-url? target)) links)))
+    0))
 
 (defn- content-stats
   "Extract word and image counts from a node's :content field."
@@ -1832,55 +1780,61 @@ li > p { margin-top: 0.5em; }
   {:words (count-words (:content node))
    :images (count-images (:content node))})
 
+(defn- inc-stat
+  "Increment a stat counter in a map, initializing to 0 if absent."
+  [m k]
+  (update m k (fnil inc 0)))
+
+(defn- add-stat
+  "Add n to a stat counter in a map, initializing to 0 if absent."
+  [m k n]
+  (update m k (fnil + 0) n))
+
 (defn collect-stats
   "Recursively collect statistics from AST nodes."
   [node]
   (let [node-type (:type node)
         children (:children node [])
         items (:items node [])
-        ;; Recursively collect from children and items
         child-stats (reduce (fn [acc child]
                               (merge-with + acc (collect-stats child)))
                             {}
                             (concat children items))
-        ;; Count this node
         base-stats (case node-type
                      :section (-> child-stats
-                                  (update :sections (fnil inc 0))
-                                  (update :words (fnil + 0) (count-words (:title node))))
+                                  (inc-stat :sections)
+                                  (add-stat :words (count-words (:title node))))
                      :paragraph (let [{:keys [words images]} (content-stats node)]
                                   (-> child-stats
-                                      (update :paragraphs (fnil inc 0))
-                                      (update :words (fnil + 0) words)
-                                      (update :images (fnil + 0) images)))
-                     :table (update child-stats :tables (fnil inc 0))
-                     :list (update child-stats :lists (fnil inc 0))
+                                      (inc-stat :paragraphs)
+                                      (add-stat :words words)
+                                      (add-stat :images images)))
+                     :table (inc-stat child-stats :tables)
+                     :list (inc-stat child-stats :lists)
                      :list-item (-> child-stats
-                                    (update :list-items (fnil inc 0))
-                                    (update :words (fnil + 0)
-                                            (+ (count-words (:content node))
-                                               (count-words (:term node))
-                                               (count-words (:definition node))))
-                                    (update :images (fnil + 0)
-                                            (+ (count-images (:content node))
-                                               (count-images (:definition node)))))
-                     :src-block (update child-stats :src-blocks (fnil inc 0))
+                                    (inc-stat :list-items)
+                                    (add-stat :words (+ (count-words (:content node))
+                                                        (count-words (:term node))
+                                                        (count-words (:definition node))))
+                                    (add-stat :images (+ (count-images (:content node))
+                                                         (count-images (:definition node)))))
+                     :src-block (inc-stat child-stats :src-blocks)
                      :quote-block (let [{:keys [words images]} (content-stats node)]
                                     (-> child-stats
-                                        (update :quote-blocks (fnil inc 0))
-                                        (update :words (fnil + 0) words)
-                                        (update :images (fnil + 0) images)))
-                     :block (update child-stats :blocks (fnil inc 0))
-                     :comment (update child-stats :comments (fnil inc 0))
-                     :fixed-width (update child-stats :fixed-width (fnil inc 0))
+                                        (inc-stat :quote-blocks)
+                                        (add-stat :words words)
+                                        (add-stat :images images)))
+                     :block (inc-stat child-stats :blocks)
+                     :comment (inc-stat child-stats :comments)
+                     :fixed-width (inc-stat child-stats :fixed-width)
                      :footnote-def (let [{:keys [words images]} (content-stats node)]
                                      (-> child-stats
-                                         (update :footnotes (fnil inc 0))
-                                         (update :words (fnil + 0) words)
-                                         (update :images (fnil + 0) images)))
-                     :html-line (update child-stats :html-lines (fnil inc 0))
-                     :latex-line (update child-stats :latex-lines (fnil inc 0))
-                     :property-drawer (update child-stats :property-drawers (fnil inc 0))
+                                         (inc-stat :footnotes)
+                                         (add-stat :words words)
+                                         (add-stat :images images)))
+                     :html-line (inc-stat child-stats :html-lines)
+                     :latex-line (inc-stat child-stats :latex-lines)
+                     :property-drawer (inc-stat child-stats :property-drawers)
                      :document child-stats
                      child-stats)]
     base-stats))
@@ -1888,21 +1842,16 @@ li > p { margin-top: 0.5em; }
 (defn compute-stats
   "Compute statistics for an AST and return a sorted map."
   [ast]
-  (let [raw-stats (collect-stats ast)
-        ;; Define display order
+  (let [raw-stats   (collect-stats ast)
         ordered-keys [:sections :paragraphs :words :images :lists :list-items
                       :tables :src-blocks :quote-blocks :blocks
                       :footnotes :comments :fixed-width :html-lines
                       :latex-lines :property-drawers]
-        ;; Filter to only keys with values > 0
+        index-map   (zipmap ordered-keys (range))
         present-stats (into {} (filter (fn [[_ v]] (and v (pos? v))) raw-stats))]
-    ;; Return in order, only present keys
     (into (sorted-map-by (fn [a b]
-                           (let [ia (.indexOf ordered-keys a)
-                                 ib (.indexOf ordered-keys b)
-                                 ia' (if (neg? ia) 999 ia)
-                                 ib' (if (neg? ib) 999 ib)]
-                             (compare ia' ib'))))
+                           (compare (get index-map a 999)
+                                    (get index-map b 999))))
           present-stats)))
 
 (def ^:private stats-label-map
@@ -1937,7 +1886,6 @@ li > p { margin-top: 0.5em; }
          (str/join "\n"))))
 
 ;; CLI Options
-
 (def cli-options
   [["-h" "--help" "Show help"]
    ["-f" "--format FORMAT" "Output format: json, edn, yaml, md, html, or org"
