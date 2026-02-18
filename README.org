@@ -2,17 +2,35 @@
 
 Take an Org file and output it as data in json/yaml/edn format, or export it to md/html/org.
 
-* Usage examples
+* Usage
 
 :   org-parse notes.org                       # Output JSON with content rendered as Markdown
-:   org-parse -f edn notes.org                # Output in EDN format
-:   org-parse -f yaml notes.org               # Output in YAML format
-:   org-parse -f md notes.org                 # Export as Markdown
-:   org-parse -f html notes.org               # Export as HTML
+:   org-parse -s notes.org                    # Display some stats on notes.org
+
+You can output the AST of an Org file to various formats:
+
+:   org-parse -f edn notes.org                # Output AST in EDN format
+:   org-parse -f yaml notes.org               # Output AST in YAML format
+
+By default, the contents of the AST is exported as Markdown, you can
+ask HTML or Org instead:
+
+:   org-parse -r html notes.org               # Output AST (as json) and render contents as HTML
+:   org-parse -r org notes.org                # Output AST (as json) and render contents as Org
+
+Instead of exporting the AST, you can export the entire file to
+Markdown, HTML or Org:
+
+:   org-parse -f md notes.org                 # Export the file as Markdown
+:   org-parse -f html notes.org               # Export the file as HTML
 :   org-parse -f org notes.org                # Export as Org (unwrapped)
-:   org-parse -r html notes.org               # Render content as HTML in JSON output
-:   org-parse -r org notes.org                # Keep content as Org in JSON output
+
+By default, the contents are unwrapped, you can prevent this:
+
 :   org-parse -n notes.org                    # Preserve original line breaks (no unwrap)
+
+If you don't need the full AST, you can apply some filtering:
+
 :   org-parse -m 2 notes.org                  # Filter: headlines with level <= 2
 :   org-parse -M 2 notes.org                  # Filter: headlines with level >= 2
 :   org-parse -m 3 -M 2 notes.org             # Filter: headlines with 2 <= level <= 3
@@ -21,7 +39,10 @@ Take an Org file and output it as data in json/yaml/edn format, or export it to 
 :   org-parse -i "section[0-9]+" notes.org    # Filter: ID or CUSTOM_ID matches regex
 :   org-parse -I "chapter\d+" notes.org       # Filter: ancestor ID or CUSTOM_ID matches regex
 :   org-parse -m 2 -i "^ch" notes.org         # Combine filters (all must match)
-:   cat notes.org | org-parse -               # Read from stdin
+
+Display stats:
+
+:   org-parse -s notes.org                    # Display basic stats about notes.org
 
 Check help with =org-parse --help=.
 
