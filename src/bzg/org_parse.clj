@@ -921,9 +921,17 @@
              (<= (count indent) min-indent)))
       [collected remaining]
 
-      ;; Blank lines are included (they separate paragraphs)
+      ;; Blank lines: only consume if a continuation follows (indented line or deeper list item).
+      ;; If what follows is a headline or non-indented content, stop and leave blanks unconsumed
+      ;; so parse-content can count them as trailing-blanks.
       (str/blank? line)
-      (recur more (conj collected (first remaining)) false nil)
+      (let [next-non-blank (first (drop-while #(str/blank? (:line %)) more))]
+        (if (or (nil? next-non-blank)
+                (headline? (:line next-non-blank))
+                (and (not (re-matches #"^\s+.*$" (:line next-non-blank)))
+                     (not (re-matches list-item-pattern (:line next-non-blank)))))
+          [collected remaining]
+          (recur more (conj collected (first remaining)) false nil)))
 
       ;; Indented continuation lines (more than min-indent) are included
       (re-matches #"^\s+.*$" line)
@@ -997,9 +1005,17 @@
               (recur rest-lines (flush-item items updated-item) nil false))
             (recur more items current-item after-blank))
 
-          ;; Blank line - skip but track that we saw one
+          ;; Blank line - peek ahead: if the next non-blank line would end the list,
+          ;; leave blanks unconsumed so parse-content can count them as trailing-blanks.
           (str/blank? line)
-          (recur more items current-item true)
+          (let [next-non-blank (first (drop-while #(str/blank? (:line %)) more))]
+            (if (or (nil? next-non-blank)
+                    (headline? (:line next-non-blank))
+                    (not (when-let [[_ indent marker _] (re-matches list-item-pattern (:line next-non-blank))]
+                           (and (= (count indent) initial-indent)
+                                (= (normalize-marker marker) normalized-initial)))))
+              [(flush-item items current-item) remaining]
+              (recur more items current-item true)))
 
           ;; End of list (different marker, less indent, or non-continuation line)
           :else
