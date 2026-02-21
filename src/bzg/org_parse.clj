@@ -16,11 +16,11 @@
 (def list-indent-width 2)
 (def max-heading-level 6)
 
-;; Error/Warning Accumulator
-(def ^:dynamic *parse-errors* (atom []))
+(def ^:dynamic *parse-errors* nil)
 
 (defn add-parse-error! [line-num message]
-  (swap! *parse-errors* conj {:line line-num :message message}))
+  (when *parse-errors*
+    (vswap! *parse-errors* conj {:line line-num :message message})))
 
 (defn empty-value?
   "True if value is nil, empty collection, or blank string."
@@ -38,6 +38,11 @@
   "Create an AST node, filtering out empty values."
   [type & {:as fields}]
   (assoc (remove-empty-vals fields) :type type))
+
+(defn non-blank?
+  "True if s is a non-nil, non-blank string."
+  [s]
+  (and (some? s) (not (str/blank? s))))
 
 ;; Regex Patterns
 (def headline-full-pattern #"^(\*+)\s+(?:(TODO|DONE)\s+)?(?:\[#([A-Z])\]\s+)?(.+?)(?:\s+(:[:\w]+:))?\s*$")
@@ -69,6 +74,7 @@
 (def ordered-list-pattern #"^\s*\d+[.)]\s+.*$")
 (def list-item-simple-pattern #"^\s*(?:[-+*]|\d+[.)])\s+.*$")
 
+;; Keywords that affect document rendering
 (def rendering-keywords
   #{"title" "author" "date" "subtitle" "email" "language"
     "html" "latex" "caption" "name" "header" "results"})
@@ -282,13 +288,14 @@
    "\\gt" ">"
    "\\checkmark" "✓"})
 
+(def ^:private entity-pattern
+  "Pre-compiled regex alternation of all org entity keys, for single-pass replacement."
+  (re-pattern (str/join "|" (map #(java.util.regex.Pattern/quote %) (keys org-entities)))))
+
 (defn replace-entities
-  "Replace Org entities (\\name) with their Unicode equivalents."
+  "Replace Org entities (\\name) with their Unicode equivalents in a single pass."
   [text]
-  (reduce (fn [t [entity replacement]]
-            (str/replace t entity replacement))
-          text
-          org-entities))
+  (str/replace text entity-pattern #(get org-entities % %)))
 
 (defn should-append? [current-line next-line in-block]
   (cond
@@ -304,7 +311,7 @@
    Returns a vector of {:line string :num original-line-number} maps."
   [input]
   (let [lines (str/split-lines input)
-        indexed (map-indexed (fn [i line] {:line line :num (inc i)}) lines)]
+        indexed (index-lines lines)]
     (:result
      (reduce
       (fn [{:keys [result in-block block-type remaining] :as acc} _]
@@ -393,7 +400,7 @@
   "Parse an Org attribute string like ':width 300 :alt \"An image\" :class my-class'
    into a map {:width \"300\" :alt \"An image\" :class \"my-class\"}"
   [s]
-  (when (and s (not (str/blank? s)))
+  (when (non-blank? s)
     (loop [remaining (str/trim s)
            result {}]
       (if (str/blank? remaining)
@@ -445,7 +452,7 @@
   (some (fn [[k v]]
           (cond
             (= k :attr) (and (map? v) (seq v))  ; :attr is a nested map
-            (string? v) (not (str/blank? v))
+            (string? v) (non-blank? v)
             :else (seq v)))
         affiliated))
 
@@ -470,19 +477,17 @@
    :verbatim  #"(?<![^\s\p{Punct}])=([^=\s](?:[^=]*[^=\s])?)=(?![^\s\p{Punct}])"})
 
 (defn escape-html [text]
-  (if (nil? text)
-    ""
+  (if (some? text)
     (-> text
         (str/replace "&" "&amp;")
         (str/replace "<" "&lt;")
-        (str/replace ">" "&gt;"))))
-
-(defn- non-blank? [s] (and s (not (str/blank? s))))
+        (str/replace ">" "&gt;"))
+    ""))
 
 (defn- upper-name [k] (str/upper-case (name k)))
 
 (defn- repeat-str
-  "Repeat string s n times."
+  "Repeat string s exactly n times. Returns empty string when n <= 0."
   [n s]
   (apply str (repeat n s)))
 
@@ -559,7 +564,7 @@
   (when (seq attrs)
     (->> attrs
          (map (fn [[k v]]
-                (when (and v (not (str/blank? (str v))))
+                (when (non-blank? (str v))
                   (str " " (name k) "=\"" (escape-html (str v)) "\""))))
          (apply str))))
 
@@ -807,6 +812,7 @@
     (when-let [[_ stars title] (re-matches headline-pattern line)]
       {:level (count stars) :title (str/trim title)})))
 
+;; Keyword set for metadata parsing (document preamble).
 (def metadata-rendering-keywords
   #{"title" "author" "date" "subtitle" "email" "language" "description" "keywords"})
 
@@ -873,7 +879,7 @@
 
 (defn normalize-marker
   "Normalize list markers for comparison.
-   Ordered markers (1. 2. 1) etc.) all normalize to :ordered.
+   Ordered markers all normalize to :ordered.
    Unordered markers stay as-is (-, +, *)."
   [marker]
   (if (ordered-marker? marker)
@@ -901,7 +907,7 @@
 
       ;; Track block start
       (and (not in-block)
-           (if-let [[_ btype] (re-matches generic-block-begin-pattern line)] btype false))
+           (re-matches generic-block-begin-pattern line))
       (let [[_ btype] (re-matches generic-block-begin-pattern line)]
         (recur more (conj collected (first remaining)) true btype))
 
@@ -941,85 +947,94 @@
       :else
       [collected remaining])))
 
+(defn- list-item-match
+  "Parse a list item line, returning [indent marker content] or nil."
+  [line]
+  (when-let [[_ indent marker content] (re-matches list-item-pattern line)]
+    [indent marker content]))
+
 (defn parse-list-items [indexed-lines initial-indent initial-marker]
   (let [normalized-initial (normalize-marker initial-marker)]
     (loop [[{:keys [line num]} & more :as remaining] indexed-lines
            items [] current-item nil after-blank false]
       (if (or (empty? remaining) (nil? line))
         [(flush-item items current-item) remaining]
-        (cond
-          ;; Headlines always end the list
-          (headline? line)
-          [(flush-item items current-item) remaining]
+        (let [li-match (list-item-match line)]
+          (cond
+            ;; Headlines always end the list
+            (headline? line)
+            [(flush-item items current-item) remaining]
 
-          ;; New list item at same indent level with same marker type
-          (when-let [[_ indent marker _] (re-matches list-item-pattern line)]
-            (and (= (count indent) initial-indent)
-                 (= (normalize-marker marker) normalized-initial)
-                 (not (and after-blank (= initial-indent 0) (= marker "*")))))
-          (let [[_ _indent marker content] (re-matches list-item-pattern line)
-                desc-item (parse-description-item content)
-                [body-lines rest-after-body] (collect-list-item-body more initial-indent)
-                [definition body-for-parsing]
-                (if (and desc-item
-                         (str/blank? (:definition desc-item))
-                         (seq body-lines))
-                  (let [first-content (->> body-lines
-                                           (drop-while #(or (str/blank? (:line %))
-                                                            (ignored-keyword-line? (:line %))))
-                                           first)]
-                    (if first-content
-                      [(str/trim (:line first-content))
-                       (rest (drop-while #(or (str/blank? (:line %))
-                                              (ignored-keyword-line? (:line %))) body-lines))]
-                      ["" body-lines]))
-                  [(or (:definition desc-item) "") body-lines])
-                [children _] (if (seq body-for-parsing)
-                               (parse-content body-for-parsing)
-                               [[] []])
-                new-item (if desc-item
-                           (make-node :list-item
-                                      :term (:term desc-item)
-                                      :definition definition
-                                      :content content
-                                      :children children
-                                      :line num)
-                           (make-node :list-item
-                                      :content content
-                                      :children children
-                                      :line num))]
-            (recur rest-after-body
-                   (flush-item items current-item)
-                   new-item
-                   false))
+            ;; New list item at same indent level with same marker type
+            (and li-match
+                 (let [[indent marker _] li-match]
+                   (and (= (count indent) initial-indent)
+                        (= (normalize-marker marker) normalized-initial)
+                        (not (and after-blank (= initial-indent 0) (= marker "*"))))))
+            (let [[_indent marker content] li-match
+                  desc-item (parse-description-item content)
+                  [body-lines rest-after-body] (collect-list-item-body more initial-indent)
+                  [definition body-for-parsing]
+                  (if (and desc-item
+                           (str/blank? (:definition desc-item))
+                           (seq body-lines))
+                    (let [first-content (->> body-lines
+                                             (drop-while #(or (str/blank? (:line %))
+                                                              (ignored-keyword-line? (:line %))))
+                                             first)]
+                      (if first-content
+                        [(str/trim (:line first-content))
+                         (rest (drop-while #(or (str/blank? (:line %))
+                                                (ignored-keyword-line? (:line %))) body-lines))]
+                        ["" body-lines]))
+                    [(or (:definition desc-item) "") body-lines])
+                  [children _] (if (seq body-for-parsing)
+                                 (parse-content body-for-parsing)
+                                 [[] []])
+                  new-item (if desc-item
+                             (make-node :list-item
+                                        :term (:term desc-item)
+                                        :definition definition
+                                        :content content
+                                        :children children
+                                        :line num)
+                             (make-node :list-item
+                                        :content content
+                                        :children children
+                                        :line num))]
+              (recur rest-after-body
+                     (flush-item items current-item)
+                     new-item
+                     false))
 
-          ;; Nested list item (deeper indent) - starts a new sublist with its own marker
-          (when-let [[_ indent _ _] (re-matches list-item-pattern line)]
-            (> (count indent) initial-indent))
-          (if current-item
-            (let [[_ indent marker _] (re-matches list-item-pattern line)
-                  sub-is-ordered (ordered-marker? marker)
-                  [sublist-items rest-lines] (parse-list-items remaining (count indent) marker)
-                  sublist (make-node :list :items sublist-items :ordered sub-is-ordered)
-                  updated-item (update current-item :children conj sublist)]
-              (recur rest-lines (flush-item items updated-item) nil false))
-            (recur more items current-item after-blank))
+            ;; Nested list item (deeper indent) - starts a new sublist with its own marker
+            (and li-match
+                 (let [[indent _ _] li-match]
+                   (> (count indent) initial-indent)))
+            (if current-item
+              (let [[indent marker _] li-match
+                    sub-is-ordered (ordered-marker? marker)
+                    [sublist-items rest-lines] (parse-list-items remaining (count indent) marker)
+                    sublist (make-node :list :items sublist-items :ordered sub-is-ordered)
+                    updated-item (update current-item :children conj sublist)]
+                (recur rest-lines (flush-item items updated-item) nil false))
+              (recur more items current-item after-blank))
 
-          ;; Blank line - peek ahead: if the next non-blank line would end the list,
-          ;; leave blanks unconsumed so parse-content can count them as trailing-blanks.
-          (str/blank? line)
-          (let [next-non-blank (first (drop-while #(str/blank? (:line %)) more))]
-            (if (or (nil? next-non-blank)
-                    (headline? (:line next-non-blank))
-                    (not (when-let [[_ indent marker _] (re-matches list-item-pattern (:line next-non-blank))]
-                           (and (= (count indent) initial-indent)
-                                (= (normalize-marker marker) normalized-initial)))))
-              [(flush-item items current-item) remaining]
-              (recur more items current-item true)))
+            ;; Blank line - peek ahead: if the next non-blank line would end the list,
+            ;; leave blanks unconsumed so parse-content can count them as trailing-blanks.
+            (str/blank? line)
+            (let [next-non-blank (first (drop-while #(str/blank? (:line %)) more))]
+              (if (or (nil? next-non-blank)
+                      (headline? (:line next-non-blank))
+                      (not (when-let [[indent marker _] (list-item-match (:line next-non-blank))]
+                             (and (= (count indent) initial-indent)
+                                  (= (normalize-marker marker) normalized-initial)))))
+                [(flush-item items current-item) remaining]
+                (recur more items current-item true)))
 
-          ;; End of list (different marker, less indent, or non-continuation line)
-          :else
-          [(flush-item items current-item) remaining])))))
+            ;; End of list (different marker, less indent, or non-continuation line)
+            :else
+            [(flush-item items current-item) remaining]))))))
 
 (defn process-list [indexed-lines]
   (let [{:keys [line num]} (first indexed-lines)]
@@ -1244,7 +1259,6 @@
       (= new-level current-level) (conj (vec (butlast path-stack)) title)
       :else (conj (vec (take (dec new-level) path-stack)) title))))
 
-
 (defn parse-sections
   ([indexed-lines current-path]
    (parse-sections indexed-lines current-path nil 0))
@@ -1297,7 +1311,7 @@
 (defn parse-org
   ([org-content] (parse-org org-content {}))
   ([org-content {:keys [unwrap?] :or {unwrap? true}}]
-   (binding [*parse-errors* (atom [])]
+   (binding [*parse-errors* (volatile! [])]
      (let [;; First replace org entities, then optionally unwrap
            with-entities (replace-entities org-content)
            ;; Use unwrap-text-indexed to preserve original line numbers
@@ -1449,7 +1463,7 @@ li > p { margin-top: 0.5em; }
       (let [format-cell #(format-text fmt %)
             formatted-rows (mapv (fn [row] (mapv format-cell row)) rows)
             ;; Find max number of columns across all rows
-            max-cols (apply max 0 (map count formatted-rows))
+            max-cols (reduce max 0 (map count formatted-rows))
             ;; Pad rows to have same number of columns
             padded-rows (mapv (fn [row]
                                 (let [missing (- max-cols (count row))]
@@ -1494,275 +1508,280 @@ li > p { margin-top: 0.5em; }
                        (str/join "\n" (map #(render-node % fmt (inc level)) (:children item))))]
     (str indent marker content (when children-str (str "\n" children-str)))))
 
+(defn- render-children
+  "Render a sequence of child nodes with smart spacing.
+   Sections handle their own spacing via :blank-lines-before."
+  [children fmt]
+  (let [indexed (map-indexed vector children)
+        rendered (for [[i child] indexed
+                       :let [r (render-node child fmt)]
+                       :when (not (str/blank? r))]
+                   {:index i :type (:type child) :rendered r})]
+    (loop [items rendered
+           result []]
+      (if (empty? items)
+        (str/join "" result)
+        (let [{:keys [type rendered]} (first items)
+              is-first (empty? result)
+              is-section (= type :section)]
+          (recur (rest items)
+                 (conj result
+                       (cond
+                         is-first rendered
+                         is-section (str "\n" rendered)
+                         (= fmt :html) (str "\n" rendered)
+                         :else (str "\n\n" rendered)))))))))
+
+(defn- render-document [node fmt level]
+  (case fmt
+    :html (let [footnotes (filter #(= (:type %) :footnote-def) (:children node))
+                main-content (str (when-let [t (:title node)] (str "<h1>" (format-text-html t) "</h1>\n"))
+                                  (->> (:children node)
+                                       (remove #(= (:type %) :footnote-def))
+                                       (map #(render-node % fmt level))
+                                       (str/join "\n")))
+                footnotes-html (when (seq footnotes)
+                                 (str "<aside class=\"footnotes\">\n"
+                                      (str/join "\n" (map #(render-node % fmt level) footnotes))
+                                      "\n</aside>"))]
+            (html-template (:title node "Untitled Document")
+                           (str main-content (when footnotes-html (str "\n" footnotes-html)))))
+    :org (let [meta (:meta node)
+               meta-str (cond
+                          (seq (:_raw meta)) (str/join "\n" (:_raw meta))
+                          (seq (:_order meta))
+                          (str/join "\n"
+                                    (keep (fn [k]
+                                            (let [v (get meta k)]
+                                              (when (non-blank? (str v))
+                                                (if (vector? v)
+                                                  (str/join "\n" (map #(str "#+" (upper-name k) ": " %) v))
+                                                  (str "#+" (upper-name k) ": " v)))))
+                                          (:_order meta)))
+                          :else nil)]
+           (str (when (seq meta-str) (str meta-str "\n\n"))
+                (render-children (:children node) fmt)))
+    ;; default: markdown
+    (let [title (if-let [t (:title node)] (str "# " (format-text :md t) "\n\n") "")]
+      (str title (render-children (:children node) fmt)))))
+
+(defn- render-section [node fmt]
+  (case fmt
+    :html (let [lvl (min (:level node) max-heading-level)
+                tag (str "h" lvl)
+                section-id (or (get-in node [:properties :custom_id])
+                               (heading-to-slug (:title node)))
+                todo-html (when (:todo node)
+                            (str "<span class=\"todo " (str/lower-case (name (:todo node))) "\">"
+                                 (name (:todo node)) "</span> "))
+                priority-html (when (:priority node)
+                                (str "<span class=\"priority\">[#" (:priority node) "]</span> "))
+                tags-html (when (seq (:tags node))
+                            (str " <span class=\"tags\">:" (str/join ":" (:tags node)) ":</span>"))]
+            (str "<section id=\"" section-id "\">\n<" tag ">"
+                 todo-html priority-html (format-text-html (:title node)) tags-html
+                 "</" tag ">\n"
+                 (render-children (:children node) fmt) "\n</section>"))
+    :org (let [blanks-before (repeat-str (or (:blank-lines-before node) 0) "\n")
+               blanks-after-title (repeat-str (or (:blank-lines-after-title node) 0) "\n")
+               stars (repeat-str (:level node) "*")
+               todo-str (when (:todo node) (str (name (:todo node)) " "))
+               priority-str (when (:priority node) (str "[#" (:priority node) "] "))
+               tags-str (when (seq (:tags node)) (str " :" (str/join ":" (:tags node)) ":"))
+               props-str (render-properties-org (:properties node))
+               children-str (render-children (:children node) fmt)]
+           (str blanks-before
+                stars " " todo-str priority-str (:title node) tags-str
+                (when props-str (str "\n" props-str))
+                blanks-after-title
+                (when (seq children-str) (str "\n" children-str))))
+    ;; default: markdown
+    (let [blanks-before (repeat-str (or (:blank-lines-before node) 0) "\n")
+          blanks-after-title (repeat-str (or (:blank-lines-after-title node) 0) "\n")
+          todo-str (when (:todo node) (str "**" (name (:todo node)) "** "))
+          priority-str (when (:priority node) (str "[#" (:priority node) "] "))
+          tags-str (when (seq (:tags node)) (str " `:" (str/join ":" (:tags node)) ":`"))
+          heading (str (repeat-str (:level node) "#") " "
+                       todo-str priority-str
+                       (format-text :md (:title node))
+                       tags-str)]
+      (str blanks-before heading "\n" blanks-after-title (render-children (:children node) fmt)))))
+
+(defn- render-paragraph [node fmt]
+  (case fmt
+    :html (format-paragraph-html (:content node) (:affiliated node))
+    :org (let [affiliated (:affiliated node)
+               attr-lines (when affiliated
+                            (str/join "\n"
+                                      (concat
+                                       (when-let [caption (:caption affiliated)]
+                                         [(str "#+caption: " caption)])
+                                       (when-let [name (:name affiliated)]
+                                         [(str "#+name: " name)])
+                                       (for [[attr-type attrs] (:attr affiliated)
+                                             :when (seq attrs)]
+                                         (str "#+attr_" (name attr-type) ": "
+                                              (str/join " " (for [[k v] attrs]
+                                                              (if (str/includes? v " ")
+                                                                (str ":" (name k) " \"" v "\"")
+                                                                (str ":" (name k) " " v)))))))))]
+           (if (seq attr-lines)
+             (str attr-lines "\n" (:content node))
+             (:content node)))
+    (format-text :md (:content node))))
+
+(defn- render-list-node [node fmt level]
+  (case fmt
+    :html (let [tag (cond (:description node) "dl"
+                          (:ordered node) "ol"
+                          :else "ul")
+                items-html (str/join "\n" (map #(render-node % fmt) (:items node)))]
+            (str "<" tag ">\n" items-html "\n</" tag ">"))
+    (str/join "\n" (map-indexed
+                    (fn [idx item] (render-list-item item idx (:ordered node) level fmt))
+                    (:items node)))))
+
+(defn- render-list-item-node [node fmt level]
+  (if (= fmt :html)
+    (let [children-html (when (seq (:children node))
+                          (str "\n" (str/join "\n" (map #(render-node % fmt) (:children node)))))]
+      (if (:term node)
+        (str "<dt>" (format-text-html (:term node)) "</dt>\n<dd>"
+             (format-text-html (:definition node)) children-html "</dd>")
+        (str "<li>" (format-text-html (:content node)) children-html "</li>")))
+    (render-list-item node 0 false level fmt)))
+
+(defn- render-table-node [node fmt]
+  (if (= fmt :html)
+    (let [rows (:rows node)
+          has-header (:has-header node)
+          cell (fn [tag content] (str "<" tag ">" (format-text-html content) "</" tag ">"))]
+      (if (empty? rows) ""
+          (str "<table>\n"
+               (when has-header
+                 (str "  <thead>\n    <tr>\n      "
+                      (str/join "" (map #(cell "th" %) (first rows)))
+                      "\n    </tr>\n  </thead>\n"))
+               "  <tbody>\n"
+               (str/join "\n"
+                         (map (fn [row]
+                                (str "    <tr>\n      "
+                                     (str/join "" (map #(cell "td" %) row))
+                                     "\n    </tr>"))
+                              (if has-header (rest rows) rows)))
+               "\n  </tbody>\n</table>")))
+    (render-table (:rows node) (:has-header node) fmt)))
+
+(defn- render-src-block [node fmt]
+  (case fmt
+    :html (str "<pre><code"
+               (when (non-blank? (:language node))
+                 (str " class=\"language-" (escape-html (:language node)) "\""))
+               ">" (escape-html (:content node)) "</code></pre>")
+    :org (let [lang (:language node)
+               args (:args node)
+               escaped-content (escape-block-content (:content node))]
+           (str "#+BEGIN_SRC"
+                (when (non-blank? lang) (str " " lang))
+                (when (non-blank? args) (str " " args))
+                "\n" escaped-content "\n#+END_SRC"))
+    (str "```" (or (:language node) "") "\n" (:content node) "\n```")))
+
+(defn- render-quote-block [node fmt]
+  (case fmt
+    :html (str "<blockquote>\n"
+               (->> (str/split (:content node) #"\n\n+")
+                    (map #(str "<p>" (format-text-html %) "</p>"))
+                    (str/join "\n"))
+               "\n</blockquote>")
+    :org (str "#+BEGIN_QUOTE\n" (escape-block-content (:content node)) "\n#+END_QUOTE")
+    (str/join "\n" (map #(str "> " (format-text :md %)) (str/split-lines (:content node))))))
+
+(defn- render-comment-node [node fmt]
+  (case fmt
+    :html (str "<!-- " (escape-html (:content node)) " -->")
+    :org (prefix-lines "# " (:content node))
+    (str "<!-- " (escape-html (:content node)) " -->")))
+
+(defn- render-fixed-width [node fmt]
+  (case fmt
+    :html (str "<pre>" (escape-html (:content node)) "</pre>")
+    :org (prefix-lines ": " (:content node))
+    (str "```\n" (:content node) "\n```")))
+
+(defn- render-footnote-def-node [node fmt]
+  (case fmt
+    :html (let [label (escape-html (:label node))]
+            (str "<div class=\"footnote\" id=\"fn-" label "\">"
+                 "<a href=\"#fnref-" label "\" class=\"footnote-backref\"><sup>" label "</sup></a> "
+                 (format-text-html (:content node)) "</div>"))
+    :org (str "[fn:" (:label node) "] " (:content node))
+    (str "[^" (:label node) "]: " (format-text :md (:content node)))))
+
+(defn- render-generic-block [node fmt]
+  (let [block-type (:block-type node)
+        export-type (:args node)]
+    (case fmt
+      :html (case block-type
+              :warning (str "<div class=\"warning\">" (format-text-html (:content node)) "</div>")
+              :note (str "<div class=\"note\">" (format-text-html (:content node)) "</div>")
+              :example (str "<pre>" (escape-html (:content node)) "</pre>")
+              :export (if (= export-type "html") (:content node) "")
+              (str "<div class=\"block-" (name block-type) "\">"
+                   "<pre>" (escape-html (:content node)) "</pre></div>"))
+      :org (case block-type
+             :export (if (= export-type "org")
+                       (:content node)
+                       (str "#+BEGIN_EXPORT"
+                            (when (non-blank? export-type) (str " " export-type))
+                            "\n" (escape-block-content (:content node)) "\n#+END_EXPORT"))
+             (let [args (:args node)
+                   escaped-content (escape-block-content (:content node))]
+               (str "#+BEGIN_" (upper-name block-type)
+                    (when (non-blank? args) (str " " args))
+                    "\n" escaped-content "\n#+END_" (upper-name block-type))))
+      ;; markdown
+      (case block-type
+        :warning (str "> **Warning**\n" (str/join "\n" (map #(str "> " %) (str/split-lines (:content node)))))
+        :note (str "> **Note**\n" (str/join "\n" (map #(str "> " %) (str/split-lines (:content node)))))
+        :export (if (= export-type "markdown") (:content node) "")
+        :example (str "```\n" (:content node) "\n```")
+        (str "```" (name block-type) "\n" (:content node) "\n```")))))
+
+(defn- render-html-line [node fmt]
+  (case fmt
+    :html (:content node)
+    :org (prefix-lines "#+html: " (:content node))
+    ""))
+
+(defn- render-latex-line [node fmt]
+  (case fmt
+    :org (prefix-lines "#+latex: " (:content node))
+    ""))
+
 (defn render-node
   ([node fmt] (render-node node fmt 0))
   ([node fmt level]
-   (let [;; Smart join: sections handle their own spacing via blank-lines-before
-         render-children
-         (fn [children]
-           (let [indexed (map-indexed vector children)
-                 rendered (for [[i child] indexed
-                                :let [r (render-node child fmt)]
-                                :when (not (str/blank? r))]
-                            {:index i :type (:type child) :rendered r})]
-             (loop [items rendered
-                    result []]
-               (if (empty? items)
-                 (str/join "" result)
-                 (let [{:keys [type rendered]} (first items)
-                       is-first (empty? result)
-                       is-section (= type :section)]
-                   (recur (rest items)
-                          (conj result
-                                (cond
-                                  is-first rendered
-                                  ;; Sections: add newline to end previous line, then section adds its own blanks-before
-                                  is-section (str "\n" rendered)
-                                  ;; HTML uses single newline
-                                  (= fmt :html) (str "\n" rendered)
-                                  ;; Other elements: double newline
-                                  :else (str "\n\n" rendered)))))))))]
-     (case (:type node)
-       :document
-       (case fmt
-         :html (let [content (render-children (:children node))
-                     ;; Collect all footnote definitions from children
-                     footnotes (filter #(= (:type %) :footnote-def) (:children node))
-                     ;; Render content without footnote-defs (they'll be in the aside)
-                     main-content (str (when-let [t (:title node)] (str "<h1>" (format-text-html t) "</h1>\n"))
-                                       (->> (:children node)
-                                            (remove #(= (:type %) :footnote-def))
-                                            (map #(render-node % fmt level))
-                                            (str/join "\n")))
-                     ;; Render footnotes section if any
-                     footnotes-html (when (seq footnotes)
-                                      (str "<aside class=\"footnotes\">\n"
-                                           (str/join "\n" (map #(render-node % fmt level) footnotes))
-                                           "\n</aside>"))]
-                 (html-template (:title node "Untitled Document")
-                                (str main-content (when footnotes-html (str "\n" footnotes-html)))))
-         :org (let [meta (:meta node)
-                    meta-str (cond
-                               (seq (:_raw meta)) (str/join "\n" (:_raw meta))
-                               (seq (:_order meta))
-                               (str/join "\n"
-                                         (keep (fn [k]
-                                                 (let [v (get meta k)]
-                                                   (when (and v (not (str/blank? (str v))))
-                                                     (if (vector? v)
-                                                       (str/join "\n" (map #(str "#+" (upper-name k) ": " %) v))
-                                                       (str "#+" (upper-name k) ": " v)))))
-                                               (:_order meta)))
-                               :else nil)]
-                (str (when (seq meta-str) (str meta-str "\n\n"))
-                     (render-children (:children node))))
-         ;; default: markdown
-         (let [title (if-let [t (:title node)] (str "# " (format-text :md t) "\n\n") "")]
-           (str title (render-children (:children node)))))
-
-       :section
-       (case fmt
-         :html (let [lvl (min (:level node) max-heading-level)
-                     tag (str "h" lvl)
-                     ;; Use custom_id if present, otherwise generate from title
-                     section-id (or (get-in node [:properties :custom_id])
-                                    (heading-to-slug (:title node)))
-                     todo-html (when (:todo node)
-                                 (str "<span class=\"todo " (str/lower-case (name (:todo node))) "\">"
-                                      (name (:todo node)) "</span> "))
-                     priority-html (when (:priority node)
-                                     (str "<span class=\"priority\">[#" (:priority node) "]</span> "))
-                     tags-html (when (seq (:tags node))
-                                 (str " <span class=\"tags\">:" (str/join ":" (:tags node)) ":</span>"))]
-                 (str "<section id=\"" section-id "\">\n<" tag ">"
-                      todo-html priority-html (format-text-html (:title node)) tags-html
-                      "</" tag ">\n"
-                      (render-children (:children node)) "\n</section>"))
-         :org (let [blanks-before (repeat-str (or (:blank-lines-before node) 0) "\n")
-                    blanks-after-title (repeat-str (or (:blank-lines-after-title node) 0) "\n")
-                    stars (repeat-str (:level node) "*")
-                    todo-str (when (:todo node) (str (name (:todo node)) " "))
-                    priority-str (when (:priority node) (str "[#" (:priority node) "] "))
-                    tags-str (when (seq (:tags node)) (str " :" (str/join ":" (:tags node)) ":"))
-                    props-str (render-properties-org (:properties node))
-                    children-str (render-children (:children node))]
-                (str blanks-before
-                     stars " " todo-str priority-str (:title node) tags-str
-                     (when props-str (str "\n" props-str))
-                     blanks-after-title
-                     (when (seq children-str) (str "\n" children-str))))
-         ;; default: markdown
-         (let [blanks-before (repeat-str (or (:blank-lines-before node) 0) "\n")
-               blanks-after-title (repeat-str (or (:blank-lines-after-title node) 0) "\n")
-               todo-str (when (:todo node) (str "**" (name (:todo node)) "** "))
-               priority-str (when (:priority node) (str "[#" (:priority node) "] "))
-               tags-str (when (seq (:tags node)) (str " `:" (str/join ":" (:tags node)) ":`"))
-               heading (str (repeat-str (:level node) "#") " "
-                            todo-str priority-str
-                            (format-text :md (:title node))
-                            tags-str)]
-           (str blanks-before heading "\n" blanks-after-title (render-children (:children node)))))
-
-       :paragraph
-       (case fmt
-         :html (format-paragraph-html (:content node) (:affiliated node))
-         :org (let [affiliated (:affiliated node)
-                    attr-lines (when affiliated
-                                 (str/join "\n"
-                                           (concat
-                                            (when-let [caption (:caption affiliated)]
-                                              [(str "#+caption: " caption)])
-                                            (when-let [name (:name affiliated)]
-                                              [(str "#+name: " name)])
-                                            (for [[attr-type attrs] (:attr affiliated)
-                                                  :when (seq attrs)]
-                                              (str "#+attr_" (name attr-type) ": "
-                                                   (str/join " " (for [[k v] attrs]
-                                                                   (if (str/includes? v " ")
-                                                                     (str ":" (name k) " \"" v "\"")
-                                                                     (str ":" (name k) " " v)))))))))]
-                (if (seq attr-lines)
-                  (str attr-lines "\n" (:content node))
-                  (:content node)))
-         (format-text :md (:content node)))
-
-       :list
-       (case fmt
-         :html (let [tag (cond (:description node) "dl"
-                               (:ordered node) "ol"
-                               :else "ul")
-                     items-html (str/join "\n" (map #(render-node % fmt) (:items node)))]
-                 (str "<" tag ">\n" items-html "\n</" tag ">"))
-         (str/join "\n" (map-indexed
-                         (fn [idx item] (render-list-item item idx (:ordered node) level fmt))
-                         (:items node))))
-
-       :list-item
-       (if (= fmt :html)
-         (let [children-html (when (seq (:children node))
-                               (str "\n" (str/join "\n" (map #(render-node % fmt) (:children node)))))]
-           (if (:term node)
-             (str "<dt>" (format-text-html (:term node)) "</dt>\n<dd>"
-                  (format-text-html (:definition node)) children-html "</dd>")
-             (str "<li>" (format-text-html (:content node)) children-html "</li>")))
-         (render-list-item node 0 false level fmt))
-
-       :table
-       (if (= fmt :html)
-         (let [rows (:rows node)
-               has-header (:has-header node)
-               cell (fn [tag content] (str "<" tag ">" (format-text-html content) "</" tag ">"))]
-           (if (empty? rows) ""
-               (str "<table>\n"
-                    (when has-header
-                      (str "  <thead>\n    <tr>\n      "
-                           (str/join "" (map #(cell "th" %) (first rows)))
-                           "\n    </tr>\n  </thead>\n"))
-                    "  <tbody>\n"
-                    (str/join "\n"
-                              (map (fn [row]
-                                     (str "    <tr>\n      "
-                                          (str/join "" (map #(cell "td" %) row))
-                                          "\n    </tr>"))
-                                   (if has-header (rest rows) rows)))
-                    "\n  </tbody>\n</table>")))
-         (render-table (:rows node) (:has-header node) fmt))
-
-       :src-block
-       (case fmt
-         :html (str "<pre><code"
-                    (when (non-blank? (:language node))
-                      (str " class=\"language-" (escape-html (:language node)) "\""))
-                    ">" (escape-html (:content node)) "</code></pre>")
-         :org (let [lang (:language node)
-                    args (:args node)
-                    ;; Re-escape lines that need comma protection
-                    escaped-content (escape-block-content (:content node))]
-                (str "#+BEGIN_SRC"
-                     (when (non-blank? lang) (str " " lang))
-                     (when (non-blank? args) (str " " args))
-                     "\n" escaped-content "\n#+END_SRC"))
-         (str "```" (or (:language node) "") "\n" (:content node) "\n```"))
-
-       :quote-block
-       (case fmt
-         :html (str "<blockquote>\n"
-                    (->> (str/split (:content node) #"\n\n+")
-                         (map #(str "<p>" (format-text-html %) "</p>"))
-                         (str/join "\n"))
-                    "\n</blockquote>")
-         :org (str "#+BEGIN_QUOTE\n" (escape-block-content (:content node)) "\n#+END_QUOTE")
-         (str/join "\n" (map #(str "> " (format-text :md %)) (str/split-lines (:content node)))))
-
-       :property-drawer
-       (if (= fmt :org) (render-properties-org (:properties node)) "")
-
-       :comment
-       (case fmt
-         :html (str "<!-- " (escape-html (:content node)) " -->")
-         :org (prefix-lines "# " (:content node))
-         (str "<!-- " (escape-html (:content node)) " -->"))
-
-       :fixed-width
-       (case fmt
-         :html (str "<pre>" (escape-html (:content node)) "</pre>")
-         :org (prefix-lines ": " (:content node))
-         (str "```\n" (:content node) "\n```"))
-
-       :footnote-def
-       (case fmt
-         :html (let [label (escape-html (:label node))]
-                 (str "<div class=\"footnote\" id=\"fn-" label "\">"
-                      "<a href=\"#fnref-" label "\" class=\"footnote-backref\"><sup>" label "</sup></a> "
-                      (format-text-html (:content node)) "</div>"))
-         :org (str "[fn:" (:label node) "] " (:content node))
-         (str "[^" (:label node) "]: " (format-text :md (:content node))))
-
-       :block
-       (let [block-type (:block-type node)
-             export-type (:args node)]
-         (case fmt
-           :html (case block-type
-                   :warning (str "<div class=\"warning\">" (format-text-html (:content node)) "</div>")
-                   :note (str "<div class=\"note\">" (format-text-html (:content node)) "</div>")
-                   :example (str "<pre>" (escape-html (:content node)) "</pre>")
-                   :export (if (= export-type "html") (:content node) "")
-                   (str "<div class=\"block-" (name block-type) "\">"
-                        "<pre>" (escape-html (:content node)) "</pre></div>"))
-           :org (case block-type
-                  :export (if (= export-type "org")
-                            (:content node)
-                            (str "#+BEGIN_EXPORT"
-                                 (when (non-blank? export-type) (str " " export-type))
-                                 "\n" (escape-block-content (:content node)) "\n#+END_EXPORT"))
-                  (let [args (:args node)
-                        escaped-content (escape-block-content (:content node))]
-                    (str "#+BEGIN_" (upper-name block-type)
-                         (when (non-blank? args) (str " " args))
-                         "\n" escaped-content "\n#+END_" (upper-name block-type))))
-           ;; markdown
-           (case block-type
-             :warning (str "> **Warning**\n" (str/join "\n" (map #(str "> " %) (str/split-lines (:content node)))))
-             :note (str "> **Note**\n" (str/join "\n" (map #(str "> " %) (str/split-lines (:content node)))))
-             :export (if (= export-type "markdown") (:content node) "")
-             :example (str "```\n" (:content node) "\n```")
-             (str "```" (name block-type) "\n" (:content node) "\n```"))))
-
-       :html-line
-       (case fmt
-         :html (:content node)  ;; Raw HTML, no wrapper
-         :org (prefix-lines "#+html: " (:content node))
-         "") ;; markdown: remove
-
-       :latex-line
-       (case fmt
-         :org (prefix-lines "#+latex: " (:content node))
-         "") ;; html and markdown: remove
-
-       ;; Default case for warnings or unknown types
-       (if (:warning node)
-         (str "<!-- Warning at line " (:error-line node) ": " (:warning node) " -->")
-         "")))))
+   (case (:type node)
+     :document       (render-document node fmt level)
+     :section        (render-section node fmt)
+     :paragraph      (render-paragraph node fmt)
+     :list           (render-list-node node fmt level)
+     :list-item      (render-list-item-node node fmt level)
+     :table          (render-table-node node fmt)
+     :src-block      (render-src-block node fmt)
+     :quote-block    (render-quote-block node fmt)
+     :property-drawer (if (= fmt :org) (render-properties-org (:properties node)) "")
+     :comment        (render-comment-node node fmt)
+     :fixed-width    (render-fixed-width node fmt)
+     :footnote-def   (render-footnote-def-node node fmt)
+     :block          (render-generic-block node fmt)
+     :html-line      (render-html-line node fmt)
+     :latex-line     (render-latex-line node fmt)
+     ;; Default case for warnings or unknown types
+     (if (:warning node)
+       (str "<!-- Warning at line " (:error-line node) ": " (:warning node) " -->")
+       ""))))
 
 (defn render-ast-as-markdown [ast] (render-node ast :md))
 (defn render-ast-as-html [ast] (render-node ast :html))
@@ -1771,7 +1790,7 @@ li > p { margin-top: 0.5em; }
 ;; Output Formatting
 (defn format-ast-as-json [ast] (json/generate-string ast {:pretty true}))
 (defn format-ast-as-edn [ast]
-  (with-out-str (binding [*print-length* nil *print-level* nil *print-dup* false] (pprint/pprint ast))))
+  (with-out-str (binding [*print-length* nil *print-level* nil] (pprint/pprint ast))))
 (defn format-ast-as-yaml [ast]
   (yaml/generate-string ast {:dumper-options {:flow-style :block}}))
 
@@ -1893,7 +1912,7 @@ li > p { margin-top: 0.5em; }
   [stats]
   (let [max-label-len (->> (keys stats)
                            (map #(count (get stats-label-map % (name %))))
-                           (apply max 0))]
+                           (reduce max 0))]
     (->> stats
          (map (fn [[k v]]
                 (let [label (get stats-label-map k (name k))
