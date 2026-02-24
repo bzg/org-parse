@@ -1,2 +1,2 @@
-{:src "src/bzg"
- :bbin/bin {org-parse {:main-opts ["-m" "org-parse"]}}}
+{:paths ["src/bzg"]
+ :bbin/bin {org-parse {:main-opts ["-m" "bzg.org-parse"]}}}
