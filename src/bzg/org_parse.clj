@@ -995,7 +995,6 @@
                              (make-node :list-item
                                         :term (:term desc-item)
                                         :definition definition
-                                        :content content
                                         :children children
                                         :line num)
                              (make-node :list-item
@@ -1412,7 +1411,10 @@
                  :section (-> node (update :title fmt) (update :children render-children))
                  :paragraph (update node :content fmt)
                  :list (update node :items #(mapv (fn [i] (render-content-in-node i render-format)) %))
-                 :list-item (-> node (update :content fmt) (update :children render-children))
+                 :list-item (let [node (update node :children render-children)]
+                              (if (:term node)
+                                (-> node (update :term fmt) (update :definition fmt))
+                                (update node :content fmt)))
                  :table (update node :rows #(mapv (fn [row] (mapv fmt row)) %))
                  :quote-block (update node :content #(->> (str/split-lines %) (map fmt) (str/join "\n")))
                  :footnote-def (update node :content fmt)
@@ -1445,7 +1447,12 @@
         (case (:type node)
           :document (-> node (update :title #(when % (str/trim %))) (update :children #(clean-children % true)))
           :section (-> node (update :title str/trim) (update :properties clean-properties) (update :children #(clean-children % true)))
-          :list-item (-> node (update :content #(when % (str/trim %))) (update :children #(clean-children % false)))
+          :list-item (let [node (update node :children #(clean-children % false))]
+                       (if (:term node)
+                         (cond-> node
+                           (:term node)       (update :term str/trim)
+                           (:definition node) (update :definition str/trim))
+                         (update node :content #(when % (str/trim %)))))
           :list (update node :items #(mapv clean-node %))
           :table (update node :rows #(mapv (fn [row] (mapv str/trim row)) %))
           :property-drawer (update node :properties clean-properties)
