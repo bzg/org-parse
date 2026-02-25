@@ -982,7 +982,8 @@
                                              (drop-while #(or (str/blank? (:line %))
                                                               (ignored-keyword-line? (:line %))))
                                              first)]
-                      (if first-content
+                      (if (and first-content
+                               (not (list-item? (:line first-content))))
                         [(str/trim (:line first-content))
                          (rest (drop-while #(or (str/blank? (:line %))
                                                 (ignored-keyword-line? (:line %))) body-lines))]
