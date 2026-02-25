@@ -1334,10 +1334,9 @@
 ;; AST Filtering
 (defn section? [node] (= (:type node) :section))
 
-(defn section-matches? [section {:keys [min-level max-level title-pattern id-pattern]}]
+(defn section-matches? [section {:keys [max-level title-pattern id-pattern]}]
   (let [level (:level section)]
-    (and (or (nil? min-level) (>= level min-level))
-         (or (nil? max-level) (<= level max-level))
+    (and (or (nil? max-level) (<= level max-level))
          (or (nil? title-pattern) (when-let [title (:title section)] (re-find title-pattern title)))
          (or (nil? id-pattern)
              (when-let [id (get-in section [:properties :id])] (re-find id-pattern id))
@@ -1367,8 +1366,42 @@
          :else nil))
      node)))
 
+(declare flatten-deep-sections-expand)
+
+(defn flatten-deep-sections
+  "Transform sections deeper than max-level-all: convert their headings to bold
+   paragraphs and inline their children into the parent's child list."
+  [node max-level-all]
+  (if (nil? max-level-all)
+    node
+    (case (:type node)
+      :document (update node :children #(vec (mapcat (fn [c] (flatten-deep-sections-expand c max-level-all)) %)))
+      :section (if (<= (:level node) max-level-all)
+                 (update node :children #(vec (mapcat (fn [c] (flatten-deep-sections-expand c max-level-all)) %)))
+                 node)
+      node)))
+
+(defn flatten-deep-sections-expand
+  "For a single child node: if it's a section beyond max-level-all, return
+   a bold paragraph for its title followed by its children (recursively flattened).
+   Otherwise return the node unchanged (wrapped in a vector)."
+  [node max-level-all]
+  (if (and (= (:type node) :section) (> (:level node) max-level-all))
+    (let [title (:title node)
+          todo-prefix (when (:todo node) (str (name (:todo node)) " "))
+          priority-prefix (when (:priority node) (str "[#" (:priority node) "] "))
+          tags-suffix (when (seq (:tags node)) (str " :" (str/join ":" (:tags node)) ":"))
+          bold-title (str todo-prefix priority-prefix "*" title "*" tags-suffix)
+          title-para (make-node :paragraph :content bold-title
+                                :blank-lines-before (:blank-lines-before node))
+          children (mapcat #(flatten-deep-sections-expand % max-level-all) (:children node))]
+      (into [title-para] children))
+    [(flatten-deep-sections node max-level-all)]))
+
 (defn filter-ast [ast opts]
-  (if (every? nil? (vals opts)) ast (filter-ast-node ast opts)))
+  (let [filter-needed (some (comp some? val) (dissoc opts :max-level-all))
+        filtered (if filter-needed (filter-ast-node ast opts) ast)]
+    (flatten-deep-sections filtered (:max-level-all opts))))
 
 ;; AST Content Rendering
 (defn render-content-in-node [node render-format]
@@ -1935,7 +1968,7 @@ li > p { margin-top: 0.5em; }
    ["-I" "--section-id REGEX" "Filter: ancestor ID or CUSTOM_ID matches" :parse-fn re-pattern]
    ["-m" "--max-level LEVEL" "Filter: level <= LEVEL"
     :parse-fn #(Integer/parseInt %) :validate [pos? "Must be positive"]]
-   ["-M" "--min-level LEVEL" "Filter: level >= LEVEL"
+   ["-M" "--max-level-all LEVEL" "Filter: level <= LEVEL but render deeper headings as bold"
     :parse-fn #(Integer/parseInt %) :validate [pos? "Must be positive"]]])
 
 (defn usage [summary]
@@ -1980,8 +2013,8 @@ li > p { margin-top: 0.5em; }
         (try
           (let [unwrap? (not (:no-unwrap options))
                 ast (parse-org org-content {:unwrap? unwrap?})
-                filter-opts {:min-level (:min-level options)
-                             :max-level (:max-level options)
+                filter-opts {:max-level (:max-level options)
+                             :max-level-all (:max-level-all options)
                              :title-pattern (:title options)
                              :id-pattern (:id options)
                              :section-title-pattern (:section-title options)
