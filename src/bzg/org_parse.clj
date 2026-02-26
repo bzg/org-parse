@@ -1573,38 +1573,145 @@ li > p { margin-top: 0.5em; }
                          (= fmt :html) (str "\n" rendered)
                          :else (str "\n\n" rendered)))))))))
 
+;; #+OPTIONS parsing
+(defn parse-options-string
+  "Parse an #+OPTIONS: value string like 'toc:t H:2 num:t' into a map.
+   Values 't' become true, 'nil' become false, integers are parsed,
+   other values remain as strings."
+  [s]
+  (when (and s (not (str/blank? s)))
+    (into {}
+          (for [[_ k v] (re-seq #"(\S+):(\S+)" s)]
+            [(keyword (str/lower-case k))
+             (case v
+               "t" true
+               "nil" false
+               (try (Integer/parseInt v) (catch Exception _ v)))]))))
+
+(defn get-export-options
+  "Extract parsed export options from the AST metadata."
+  [ast]
+  (let [options-str (get-in ast [:meta :options])]
+    (parse-options-string options-str)))
+
+(defn- collect-toc-entries
+  "Recursively collect TOC entries from section nodes up to max-depth.
+   Returns a flat list of {:level :title :section-number :id} maps."
+  [children max-depth]
+  (reduce
+   (fn [entries child]
+     (if (and (= (:type child) :section)
+              (<= (:level child) max-depth))
+       (let [entry {:level (:level child)
+                    :title (:title child)
+                    :section-number (:section-number child)
+                    :id (or (get-in child [:properties :custom_id])
+                            (heading-to-slug (:title child)))}]
+         (into (conj entries entry)
+               (collect-toc-entries (:children child) max-depth)))
+       entries))
+   []
+   children))
+
+(defn- render-toc
+  "Render a table of contents from TOC entries in the given format."
+  [entries fmt]
+  (when (seq entries)
+    (case fmt
+      :html (let [sb (StringBuilder.)
+                  _ (.append sb "<nav id=\"table-of-contents\">\n<h2>Table of Contents</h2>\n")
+                  _ (loop [[entry & more] entries
+                           prev-level 0]
+                      (if (nil? entry)
+                        ;; Close all remaining open lists
+                        (dotimes [_ prev-level]
+                          (.append sb "</li>\n</ul>\n"))
+                        (let [{:keys [level title section-number id]} entry
+                              num-str (if section-number (str section-number " ") "")
+                              link (str "<a href=\"#" id "\">" num-str (format-text-html title) "</a>")]
+                          (cond
+                            ;; Deeper level: open new sublist(s)
+                            (> level prev-level)
+                            (do (dotimes [_ (- level prev-level)]
+                                  (.append sb "<ul>\n"))
+                                (.append sb (str "<li>" link))
+                                (recur more level))
+                            ;; Same level: close previous item, add new one
+                            (= level prev-level)
+                            (do (.append sb "</li>\n")
+                                (.append sb (str "<li>" link))
+                                (recur more level))
+                            ;; Shallower level: close sublists, then add item
+                            :else
+                            (do (dotimes [_ (- prev-level level)]
+                                  (.append sb "</li>\n</ul>\n"))
+                                (.append sb "</li>\n")
+                                (.append sb (str "<li>" link))
+                                (recur more level))))))
+                  _ (.append sb "</nav>")]
+              (.toString sb))
+      :org (let [items (str/join "\n"
+                                 (map (fn [{:keys [level title section-number]}]
+                                        (let [indent (repeat-str (* 2 (dec level)) " ")
+                                              num-str (when section-number (str section-number " "))]
+                                          (str indent "- " num-str title)))
+                                      entries))]
+             (str items))
+      ;; default: markdown
+      (let [items (str/join "\n"
+                            (map (fn [{:keys [level title section-number]}]
+                                   (let [indent (repeat-str (* 2 (dec level)) " ")
+                                         num-str (when section-number (str section-number " "))
+                                         slug (heading-to-slug title)]
+                                     (str indent "- [" num-str (format-text :md title) "](#" slug ")")))
+                                 entries))]
+        (str items)))))
+
 (defn- render-document [node fmt level]
-  (case fmt
-    :html (let [footnotes (filter #(= (:type %) :footnote-def) (:children node))
-                main-content (str (when-let [t (:title node)] (str "<h1>" (format-text-html t) "</h1>\n"))
-                                  (->> (:children node)
-                                       (remove #(= (:type %) :footnote-def))
-                                       (map #(render-node % fmt level))
-                                       (str/join "\n")))
-                footnotes-html (when (seq footnotes)
-                                 (str "<aside class=\"footnotes\">\n"
-                                      (str/join "\n" (map #(render-node % fmt level) footnotes))
-                                      "\n</aside>"))]
-            (html-template (:title node "Untitled Document")
-                           (str main-content (when footnotes-html (str "\n" footnotes-html)))))
-    :org (let [meta (:meta node)
-               meta-str (cond
-                          (seq (:_raw meta)) (str/join "\n" (:_raw meta))
-                          (seq (:_order meta))
-                          (str/join "\n"
-                                    (keep (fn [k]
-                                            (let [v (get meta k)]
-                                              (when (non-blank? (str v))
-                                                (if (vector? v)
-                                                  (str/join "\n" (map #(str "#+" (upper-name k) ": " %) v))
-                                                  (str "#+" (upper-name k) ": " v)))))
-                                          (:_order meta)))
-                          :else nil)]
-           (str (when (seq meta-str) (str meta-str "\n\n"))
-                (render-children (:children node) fmt)))
-    ;; default: markdown
-    (let [title (if-let [t (:title node)] (str "# " (format-text :md t) "\n\n") "")]
-      (str title (render-children (:children node) fmt)))))
+  (let [options (parse-options-string (get-in node [:meta :options]))
+        toc? (get options :toc)
+        toc-depth (let [h (get options :h 6)
+                        t (get options :toc)]
+                    ;; toc can be true (use H:) or an integer depth
+                    (if (integer? t) t (if (integer? h) h 6)))
+        toc-entries (when toc? (collect-toc-entries (:children node) toc-depth))
+        toc-str (when toc? (render-toc toc-entries fmt))]
+    (case fmt
+      :html (let [footnotes (filter #(= (:type %) :footnote-def) (:children node))
+                  title-html (when-let [t (:title node)] (str "<h1>" (format-text-html t) "</h1>\n"))
+                  toc-html (when toc-str (str toc-str "\n"))
+                  main-content (str title-html toc-html
+                                    (->> (:children node)
+                                         (remove #(= (:type %) :footnote-def))
+                                         (map #(render-node % fmt level))
+                                         (str/join "\n")))
+                  footnotes-html (when (seq footnotes)
+                                   (str "<aside class=\"footnotes\">\n"
+                                        (str/join "\n" (map #(render-node % fmt level) footnotes))
+                                        "\n</aside>"))]
+              (html-template (:title node "Untitled Document")
+                             (str main-content (when footnotes-html (str "\n" footnotes-html)))))
+      :org (let [meta (:meta node)
+                 meta-str (cond
+                            (seq (:_raw meta)) (str/join "\n" (:_raw meta))
+                            (seq (:_order meta))
+                            (str/join "\n"
+                                      (keep (fn [k]
+                                              (let [v (get meta k)]
+                                                (when (non-blank? (str v))
+                                                  (if (vector? v)
+                                                    (str/join "\n" (map #(str "#+" (upper-name k) ": " %) v))
+                                                    (str "#+" (upper-name k) ": " v)))))
+                                            (:_order meta)))
+                            :else nil)]
+             (str (when (seq meta-str) (str meta-str "\n\n"))
+                  (when toc-str (str toc-str "\n\n"))
+                  (render-children (:children node) fmt)))
+      ;; default: markdown
+      (let [title (if-let [t (:title node)] (str "# " (format-text :md t) "\n\n") "")]
+        (str title
+             (when toc-str (str toc-str "\n\n"))
+             (render-children (:children node) fmt))))))
 
 (defn- render-section [node fmt]
   (case fmt
@@ -1827,27 +1934,6 @@ li > p { margin-top: 0.5em; }
      (if (:warning node)
        (str "<!-- Warning at line " (:error-line node) ": " (:warning node) " -->")
        ""))))
-
-;; #+OPTIONS parsing
-(defn parse-options-string
-  "Parse an #+OPTIONS: value string like 'toc:t H:2 num:t' into a map.
-   Values 't' become true, 'nil' become false, integers are parsed,
-   other values remain as strings."
-  [s]
-  (when (and s (not (str/blank? s)))
-    (into {}
-          (for [[_ k v] (re-seq #"(\S+):(\S+)" s)]
-            [(keyword (str/lower-case k))
-             (case v
-               "t" true
-               "nil" false
-               (try (Integer/parseInt v) (catch Exception _ v)))]))))
-
-(defn get-export-options
-  "Extract parsed export options from the AST metadata."
-  [ast]
-  (let [options-str (get-in ast [:meta :options])]
-    (parse-options-string options-str)))
 
 ;; Section numbering
 (defn number-sections
