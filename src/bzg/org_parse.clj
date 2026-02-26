@@ -75,7 +75,9 @@
 (def list-item-simple-pattern #"^\s*(?:[-+*]|\d+[.)])\s+.*$")
 
 ;; Planning line (CLOSED, SCHEDULED, DEADLINE)
-(def org-timestamp-pattern #"<(\d{4})-(\d{2})-(\d{2})\s+\S+(?:\s+(\d{1,2}):(\d{2})(?:-(\d{1,2}):(\d{2}))?)?>|\[(\d{4})-(\d{2})-(\d{2})\s+\S+(?:\s+(\d{1,2}):(\d{2})(?:-(\d{1,2}):(\d{2}))?)?\]")
+(def org-timestamp-pattern #"<(\d{4})-(\d{2})-(\d{2})\s+\S+(?:\s+(\d{1,2}):(\d{2})(?:-(\d{1,2}):(\d{2}))?)?(?:\s+[.+]?[+]?\d+[hdwmy])*\s*>|\[(\d{4})-(\d{2})-(\d{2})\s+\S+(?:\s+(\d{1,2}):(\d{2})(?:-(\d{1,2}):(\d{2}))?)?(?:\s+[.+]?[+]?\d+[hdwmy])*\s*\]")
+(def org-repeater-pattern #"(?:^|[\s])([.+]?\+\d+[hdwmy])")
+(def org-warning-pattern #"(?:^|[\s])(-\d+[hdwmy])")
 (def planning-keyword-pattern #"^(CLOSED|SCHEDULED|DEADLINE):\s*")
 (def planning-line-pattern #"^\s*((?:(?:CLOSED|SCHEDULED|DEADLINE):\s*(?:<[^>]+>|\[[^\]]+\])\s*)+)\s*$")
 
@@ -100,9 +102,19 @@
             start))
         (str y "-" m "-" d)))))
 
+(defn parse-org-repeater
+  "Extract repeater cookie from an Org timestamp string.
+   <2025-01-15 Wed 10:30 +1w>    -> \"+1w\"
+   <2025-01-15 Wed .+2d>         -> \".+2d\"
+   <2025-01-15 Wed ++1m>         -> \"++1m\"
+   <2025-01-15 Wed 10:30>        -> nil"
+  [ts-str]
+  (when-let [[_ repeater] (re-find org-repeater-pattern ts-str)]
+    repeater))
+
 (defn parse-planning-line
   "Parse a planning information line into a map.
-   Returns {:closed \"2025-01-15\" :scheduled \"2025-01-15T10:30\" :deadline \"2025-02-01\"} or nil."
+   Returns {:closed \"2025-01-15\" :scheduled \"2025-01-15T10:30\" :scheduled-repeat \"+1w\"} or nil."
   [line]
   (when (re-matches planning-line-pattern line)
     (let [remaining (str/trim line)]
@@ -116,8 +128,11 @@
                                (re-find #"^\[[^\]]+\]" after-kw))]
               (if ts-match
                 (let [iso (parse-org-timestamp ts-match)
+                      repeater (parse-org-repeater ts-match)
+                      kw-key (keyword (str/lower-case kw))
                       rest-str (str/trim (subs after-kw (count ts-match)))]
-                  (recur rest-str (assoc result (keyword (str/lower-case kw)) iso)))
+                  (recur rest-str (cond-> (assoc result kw-key iso)
+                                   repeater (assoc (keyword (str (str/lower-case kw) "-repeat")) repeater))))
                 (when (seq result) result)))
             (when (seq result) result)))))))
 
@@ -1818,19 +1833,24 @@ li > p { margin-top: 0.5em; }
                             (str " <span class=\"tags\">:" (str/join ":" (:tags node)) ":</span>"))
                 planning (:planning node)
                 planning-html (when (seq planning)
-                                (str "<div class=\"planning\">"
-                                     (str/join " "
-                                               (keep (fn [[kw iso]]
-                                                       (when iso
-                                                         (let [datetime (first (str/split iso #"/"))
-                                                               display (str/replace iso "/" "–")]
-                                                           (str "<span class=\"planning-keyword\">"
-                                                                (str/upper-case (name kw))
-                                                                ":</span> <time datetime=\"" datetime "\">" display "</time>"))))
-                                                     [[:closed (:closed planning)]
-                                                      [:deadline (:deadline planning)]
-                                                      [:scheduled (:scheduled planning)]]))
-                                     "</div>"))]
+                                (let [repeaters {:closed (:closed-repeat planning)
+                                                 :deadline (:deadline-repeat planning)
+                                                 :scheduled (:scheduled-repeat planning)}]
+                                  (str "<div class=\"planning\">"
+                                       (str/join " "
+                                                 (keep (fn [[kw iso]]
+                                                         (when iso
+                                                           (let [rep (get repeaters kw)
+                                                                 datetime (first (str/split iso #"/"))
+                                                                 display (cond-> (str/replace iso "/" "–")
+                                                                           rep (str " " rep))]
+                                                             (str "<span class=\"planning-keyword\">"
+                                                                  (str/upper-case (name kw))
+                                                                  ":</span> <time datetime=\"" datetime "\">" display "</time>"))))
+                                                       [[:closed (:closed planning)]
+                                                        [:deadline (:deadline planning)]
+                                                        [:scheduled (:scheduled planning)]]))
+                                       "</div>")))]
             (str "<section id=\"" section-id "\">\n<" tag ">"
                  sec-num-html todo-html priority-html (format-text-html (:title node)) tags-html
                  "</" tag ">\n"
@@ -1845,24 +1865,29 @@ li > p { margin-top: 0.5em; }
                tags-str (when (seq (:tags node)) (str " :" (str/join ":" (:tags node)) ":"))
                planning (:planning node)
                planning-str (when (seq planning)
-                              (str/join " "
-                                        (keep (fn [[kw iso]]
-                                                (when iso
-                                                  (let [ts (if (str/includes? iso "/")
-                                                             ;; Interval: 2025-01-15T10:30/2025-01-15T12:00
-                                                             (let [[start end] (str/split iso #"/")
-                                                                   [d t1] (str/split start #"T")
-                                                                   t2 (second (str/split end #"T"))]
-                                                               (str "<" d " " t1 "-" t2 ">"))
-                                                             (if (str/includes? iso "T")
-                                                               (let [[d t] (str/split iso #"T")]
-                                                                 (str "<" d " " t ">"))
-                                                               (str "<" iso ">")))]
-                                                    (str (str/upper-case (name kw)) ": " ts))))
-                                              ;; Canonical order
-                                              [[:closed (:closed planning)]
-                                               [:deadline (:deadline planning)]
-                                               [:scheduled (:scheduled planning)]])))
+                              (let [repeaters {:closed (:closed-repeat planning)
+                                               :deadline (:deadline-repeat planning)
+                                               :scheduled (:scheduled-repeat planning)}]
+                                (str/join " "
+                                          (keep (fn [[kw iso]]
+                                                  (when iso
+                                                    (let [rep (get repeaters kw)
+                                                          rep-str (if rep (str " " rep) "")
+                                                          ts (if (str/includes? iso "/")
+                                                               ;; Interval: 2025-01-15T10:30/2025-01-15T12:00
+                                                               (let [[start end] (str/split iso #"/")
+                                                                     [d t1] (str/split start #"T")
+                                                                     t2 (second (str/split end #"T"))]
+                                                                 (str "<" d " " t1 "-" t2 rep-str ">"))
+                                                               (if (str/includes? iso "T")
+                                                                 (let [[d t] (str/split iso #"T")]
+                                                                   (str "<" d " " t rep-str ">"))
+                                                                 (str "<" iso rep-str ">")))]
+                                                      (str (str/upper-case (name kw)) ": " ts))))
+                                                ;; Canonical order
+                                                [[:closed (:closed planning)]
+                                                 [:deadline (:deadline planning)]
+                                                 [:scheduled (:scheduled planning)]]))))
                props-str (render-properties-org (:properties node))
                children-str (render-children (:children node) fmt)]
            (str blanks-before
@@ -1880,13 +1905,18 @@ li > p { margin-top: 0.5em; }
           tags-str (when (seq (:tags node)) (str " `:" (str/join ":" (:tags node)) ":`"))
           planning (:planning node)
           planning-str (when (seq planning)
-                         (str/join " "
-                                   (keep (fn [[kw iso]]
-                                           (when iso
-                                             (str "**" (str/upper-case (name kw)) ":** " iso)))
-                                         [[:closed (:closed planning)]
-                                          [:deadline (:deadline planning)]
-                                          [:scheduled (:scheduled planning)]])))
+                         (let [repeaters {:closed (:closed-repeat planning)
+                                          :deadline (:deadline-repeat planning)
+                                          :scheduled (:scheduled-repeat planning)}]
+                           (str/join " "
+                                     (keep (fn [[kw iso]]
+                                             (when iso
+                                               (let [rep (get repeaters kw)
+                                                     display (if rep (str iso " " rep) iso)]
+                                                 (str "**" (str/upper-case (name kw)) ":** " display))))
+                                           [[:closed (:closed planning)]
+                                            [:deadline (:deadline planning)]
+                                            [:scheduled (:scheduled planning)]]))))
           heading (str (repeat-str (:level node) "#") " "
                        todo-str priority-str sec-num-str
                        (format-text :md (:title node))
@@ -2169,13 +2199,15 @@ li > p { margin-top: 0.5em; }
                                          :title title
                                          :path new-path
                                          :todo todo
-                                         :timestamp (:scheduled planning)}))
+                                         :timestamp (:scheduled planning)
+                                         :repeater (:scheduled-repeat planning)}))
                     (when (and (:deadline planning) todo)
                       (swap! items conj {:ics-type :vtodo
                                          :title title
                                          :path new-path
                                          :todo todo
-                                         :timestamp (:deadline planning)}))))
+                                         :timestamp (:deadline planning)
+                                         :repeater (:deadline-repeat planning)}))))
                 (doseq [child (:children n)]
                   (walk child new-path))))]
       (walk node [])
@@ -2187,6 +2219,25 @@ li > p { margin-top: 0.5em; }
   (let [hash (Math/abs (.hashCode (str (:title item) (:timestamp item) index)))]
     (str hash "@org-parse")))
 
+(defn- org-repeater-to-rrule
+  "Convert Org repeater cookie to ICS RRULE string.
+   +1d  -> FREQ=DAILY;INTERVAL=1
+   +2w  -> FREQ=WEEKLY;INTERVAL=2
+   +1m  -> FREQ=MONTHLY;INTERVAL=1
+   +1y  -> FREQ=YEARLY;INTERVAL=1
+   .+1d -> FREQ=DAILY;INTERVAL=1  (shift type ignored in ICS)
+   ++1w -> FREQ=WEEKLY;INTERVAL=1 (catch-up type ignored in ICS)"
+  [repeater]
+  (when repeater
+    (when-let [[_ interval unit] (re-find #"(\d+)([hdwmy])$" repeater)]
+      (let [freq (case unit
+                   "h" "HOURLY"
+                   "d" "DAILY"
+                   "w" "WEEKLY"
+                   "m" "MONTHLY"
+                   "y" "YEARLY")]
+        (str "RRULE:FREQ=" freq ";INTERVAL=" interval)))))
+
 (defn render-ast-as-ics
   "Export scheduled items as VEVENT and deadline+TODO items as VTODO."
   [ast]
@@ -2196,11 +2247,12 @@ li > p { margin-top: 0.5em; }
         components
         (map-indexed
          (fn [idx item]
-           (let [{:keys [ics-type title todo timestamp]} item
+           (let [{:keys [ics-type title todo timestamp repeater]} item
                  uid (uid-for-item item idx)
                  ts (iso-to-ics-datetime timestamp)
                  dtstart (:dtstart ts)
                  is-date (not (str/includes? dtstart "T"))
+                 rrule (org-repeater-to-rrule repeater)
                  summary (if (and todo (= ics-type :vtodo))
                            (str (name todo) " " title)
                            title)]
@@ -2219,6 +2271,7 @@ li > p { margin-top: 0.5em; }
                                (str "DTEND:" dtend)]
                               [(str "DTSTART:" dtstart)
                                (str "DTEND:" dtstart)]))
+                          (when rrule [rrule])
                           [(ics-fold-line (str "SUMMARY:" (ics-escape summary)))
                            "END:VEVENT"]))
 
@@ -2231,6 +2284,7 @@ li > p { margin-top: 0.5em; }
                           (if is-date
                             [(str "DUE;VALUE=DATE:" dtstart)]
                             [(str "DUE:" dtstart)])
+                          (when rrule [rrule])
                           [(ics-fold-line (str "SUMMARY:" (ics-escape summary)))
                            (str "STATUS:" (if (= todo :DONE) "COMPLETED" "NEEDS-ACTION"))
                            "END:VTODO"])))))
