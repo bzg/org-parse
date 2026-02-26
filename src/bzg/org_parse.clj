@@ -1569,13 +1569,22 @@ li > p { margin-top: 0.5em; }
 .planning { color: #666; font-size: 0.9em; margin: 0.2em 0 0.5em 0; }
 .planning-keyword { font-weight: bold; }")
 
+(def hljs-cdn "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0")
+
 (defn html-template [title content]
-  (str "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
-       "  <meta charset=\"UTF-8\">\n"
-       "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
-       "  <title>" (escape-html title) "</title>\n"
-       "  <style>\n" html-styles "\n  </style>\n"
-       "</head>\n<body>\n" content "\n</body>\n</html>"))
+  (let [has-code (str/includes? content "<code")]
+    (str "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
+         "  <meta charset=\"UTF-8\">\n"
+         "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
+         "  <title>" (escape-html title) "</title>\n"
+         (when has-code
+           (str "  <link rel=\"stylesheet\" href=\"" hljs-cdn "/styles/default.min.css\">\n"))
+         "  <style>\n" html-styles "\n  </style>\n"
+         "</head>\n<body>\n" content
+         (when has-code
+           (str "\n<script src=\"" hljs-cdn "/highlight.min.js\"></script>"
+                "\n<script>hljs.highlightAll();</script>"))
+         "\n</body>\n</html>")))
 
 (defn render-table [rows has-header fmt]
   (if (empty? rows) ""
