@@ -2105,10 +2105,10 @@ li > p { margin-top: 0.5em; }
 (defn number-sections
   "Walk the AST and annotate each :section node with a :section-number string
    (e.g. '1', '1.1', '2.3.1') based on its level and position among siblings.
-   Only applied when the document has num:t in #+OPTIONS (default: true)."
+   Only applied when the document has num:t in #+OPTIONS (default: false)."
   [ast]
    (let [options (get-export-options ast)
-         num? (get options :num true)]
+         num? (get options :num false)]
     (if-not num?
       ast
       (letfn [(number-children [children counters]
