@@ -2138,9 +2138,13 @@ li > p { margin-top: 0.5em; }
                             {}
                             (concat children items))
         base-stats (case node-type
-                     :section (-> child-stats
-                                  (inc-stat :sections)
-                                  (add-stat :words (count-words (:title node))))
+                     :section (let [planning (:planning node)]
+                                (cond-> (-> child-stats
+                                            (inc-stat :sections)
+                                            (add-stat :words (count-words (:title node))))
+                                  (:scheduled planning) (inc-stat :scheduled)
+                                  (:deadline planning)  (inc-stat :deadline)
+                                  (:closed planning)    (inc-stat :closed)))
                      :paragraph (let [{:keys [words images]} (content-stats node)]
                                   (-> child-stats
                                       (inc-stat :paragraphs)
@@ -2183,7 +2187,8 @@ li > p { margin-top: 0.5em; }
         ordered-keys [:sections :paragraphs :words :images :lists :list-items
                       :tables :src-blocks :quote-blocks :blocks
                       :footnotes :comments :fixed-width :html-lines
-                      :latex-lines :property-drawers]
+                      :latex-lines :property-drawers
+                      :scheduled :deadline :closed]
         index-map   (zipmap ordered-keys (range))
         present-stats (into {} (filter (fn [[_ v]] (and v (pos? v))) raw-stats))]
     (into (sorted-map-by (fn [a b]
@@ -2207,7 +2212,10 @@ li > p { margin-top: 0.5em; }
    :fixed-width "Fixed-width blocks"
    :html-lines "HTML lines"
    :latex-lines "LaTeX lines"
-   :property-drawers "Property drawers"})
+   :property-drawers "Property drawers"
+   :scheduled "Scheduled"
+   :deadline "Deadline"
+   :closed "Closed"})
 
 (defn format-stats
   "Format statistics for display."
