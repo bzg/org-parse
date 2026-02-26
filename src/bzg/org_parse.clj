@@ -77,7 +77,7 @@
 ;; Keywords that affect document rendering
 (def rendering-keywords
   #{"title" "author" "date" "subtitle" "email" "language"
-    "html" "latex" "caption" "name" "header" "results"})
+    "html" "latex" "caption" "name" "header" "results" "options"})
 
 (defn rendering-keyword?
   "Check if a #+keyword line affects rendering.
@@ -814,7 +814,7 @@
 
 ;; Keyword set for metadata parsing (document preamble).
 (def metadata-rendering-keywords
-  #{"title" "author" "date" "subtitle" "email" "language" "description" "keywords"})
+  #{"title" "author" "date" "subtitle" "email" "language" "description" "keywords" "options"})
 
 (defn parse-metadata [indexed-lines]
   (loop [[{:keys [line] :as l} & more :as remaining] indexed-lines
@@ -1612,6 +1612,8 @@ li > p { margin-top: 0.5em; }
                 tag (str "h" lvl)
                 section-id (or (get-in node [:properties :custom_id])
                                (heading-to-slug (:title node)))
+                sec-num-html (when-let [sn (:section-number node)]
+                               (str "<span class=\"section-number\">" sn "</span> "))
                 todo-html (when (:todo node)
                             (str "<span class=\"todo " (str/lower-case (name (:todo node))) "\">"
                                  (name (:todo node)) "</span> "))
@@ -1620,7 +1622,7 @@ li > p { margin-top: 0.5em; }
                 tags-html (when (seq (:tags node))
                             (str " <span class=\"tags\">:" (str/join ":" (:tags node)) ":</span>"))]
             (str "<section id=\"" section-id "\">\n<" tag ">"
-                 todo-html priority-html (format-text-html (:title node)) tags-html
+                 sec-num-html todo-html priority-html (format-text-html (:title node)) tags-html
                  "</" tag ">\n"
                  (render-children (:children node) fmt) "\n</section>"))
     :org (let [blanks-before (repeat-str (or (:blank-lines-before node) 0) "\n")
@@ -1628,11 +1630,12 @@ li > p { margin-top: 0.5em; }
                stars (repeat-str (:level node) "*")
                todo-str (when (:todo node) (str (name (:todo node)) " "))
                priority-str (when (:priority node) (str "[#" (:priority node) "] "))
+               sec-num-str (when-let [sn (:section-number node)] (str sn " "))
                tags-str (when (seq (:tags node)) (str " :" (str/join ":" (:tags node)) ":"))
                props-str (render-properties-org (:properties node))
                children-str (render-children (:children node) fmt)]
            (str blanks-before
-                stars " " todo-str priority-str (:title node) tags-str
+                stars " " todo-str priority-str sec-num-str (:title node) tags-str
                 (when props-str (str "\n" props-str))
                 blanks-after-title
                 (when (seq children-str) (str "\n" children-str))))
@@ -1641,9 +1644,10 @@ li > p { margin-top: 0.5em; }
           blanks-after-title (repeat-str (or (:blank-lines-after-title node) 0) "\n")
           todo-str (when (:todo node) (str "**" (name (:todo node)) "** "))
           priority-str (when (:priority node) (str "[#" (:priority node) "] "))
+          sec-num-str (when-let [sn (:section-number node)] (str sn " "))
           tags-str (when (seq (:tags node)) (str " `:" (str/join ":" (:tags node)) ":`"))
           heading (str (repeat-str (:level node) "#") " "
-                       todo-str priority-str
+                       todo-str priority-str sec-num-str
                        (format-text :md (:title node))
                        tags-str)]
       (str blanks-before heading "\n" blanks-after-title (render-children (:children node) fmt)))))
@@ -1824,9 +1828,66 @@ li > p { margin-top: 0.5em; }
        (str "<!-- Warning at line " (:error-line node) ": " (:warning node) " -->")
        ""))))
 
-(defn render-ast-as-markdown [ast] (render-node ast :md))
-(defn render-ast-as-html [ast] (render-node ast :html))
-(defn render-ast-as-org [ast] (render-node ast :org))
+;; #+OPTIONS parsing
+(defn parse-options-string
+  "Parse an #+OPTIONS: value string like 'toc:t H:2 num:t' into a map.
+   Values 't' become true, 'nil' become false, integers are parsed,
+   other values remain as strings."
+  [s]
+  (when (and s (not (str/blank? s)))
+    (into {}
+          (for [[_ k v] (re-seq #"(\S+):(\S+)" s)]
+            [(keyword (str/lower-case k))
+             (case v
+               "t" true
+               "nil" false
+               (try (Integer/parseInt v) (catch Exception _ v)))]))))
+
+(defn get-export-options
+  "Extract parsed export options from the AST metadata."
+  [ast]
+  (let [options-str (get-in ast [:meta :options])]
+    (parse-options-string options-str)))
+
+;; Section numbering
+(defn number-sections
+  "Walk the AST and annotate each :section node with a :section-number string
+   (e.g. '1', '1.1', '2.3.1') based on its level and position among siblings.
+   Only applied when the document has num:t in #+OPTIONS (default: true)."
+  [ast]
+   (let [options (get-export-options ast)
+         num? (get options :num true)]
+    (if-not num?
+      ast
+      (letfn [(number-children [children counters]
+                (loop [[child & more] children
+                       counters counters
+                       result []]
+                  (if (nil? child)
+                    result
+                    (if (= (:type child) :section)
+                      (let [level (:level child)
+                            ;; Increment counter at this level, reset deeper levels
+                            updated (-> counters
+                                        (update level (fnil inc 0))
+                                        (#(reduce (fn [m k] (dissoc m k))
+                                                  %
+                                                  (filter (fn [k] (> k level)) (keys %)))))
+                            ;; Build section number string from level 1 to current level
+                            sec-num (str/join "." (map #(get updated % 1)
+                                                       (range 1 (inc level))))
+                            ;; Recursively number children of this section
+                            numbered-kids (number-children (:children child) updated)
+                            numbered-child (assoc child
+                                                  :section-number sec-num
+                                                  :children numbered-kids)]
+                        (recur more updated (conj result numbered-child)))
+                      (recur more counters (conj result child))))))]
+        (assoc ast :children (number-children (:children ast) {}))))))
+
+(defn render-ast-as-markdown [ast] (render-node (number-sections ast) :md))
+(defn render-ast-as-html [ast] (render-node (number-sections ast) :html))
+(defn render-ast-as-org [ast] (render-node (number-sections ast) :org))
 
 ;; Output Formatting
 (defn format-ast-as-json [ast] (json/generate-string ast {:pretty true}))
