@@ -662,7 +662,7 @@
 
          :else
          (let [href    (resolve-href link-type target (escape-html url))
-               display (resolve-display link-type target (escape-html url) desc)]
+               display (escape-html (resolve-display link-type target url desc))]
            (str "<a href=\"" href "\">" display "</a>")))
 
        ;; Markdown format
@@ -753,8 +753,8 @@
                         (str/replace (:italic format-patterns) "<em>$1</em>")
                         (str/replace (:underline format-patterns) "<u>$1</u>")
                         (str/replace (:strike format-patterns) "<del>$1</del>")
-                        (str/replace (:code format-patterns) #(str "<code>" (escape-html (second %)) "</code>"))
-                        (str/replace (:verbatim format-patterns) #(str "<code>" (escape-html (second %)) "</code>"))
+                        (str/replace (:code format-patterns) "<code>$1</code>")
+                        (str/replace (:verbatim format-patterns) "<code>$1</code>")
                         ;; Handle inline footnotes first (they have :content), then regular refs
                         (str/replace footnote-inline-pattern format-footnote-html)
                         (str/replace footnote-ref-pattern format-footnote-html))]
