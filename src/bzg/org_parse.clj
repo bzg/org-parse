@@ -121,8 +121,7 @@
   "Remove leading comma escape from a line inside a block.
    A comma escapes lines starting with * or #+ inside blocks."
   [line]
-  (if (and (string? line)
-           (re-matches #"^,([\*#]).*" line))
+  (if (re-matches #"^,([\*#]).*" line)
     (subs line 1)
     line))
 
@@ -137,8 +136,7 @@
   "Add leading comma to escape lines that need it inside blocks.
    Lines starting with * or #+ need escaping."
   [line]
-  (if (and (string? line)
-           (re-matches #"^[\*#].*" line))
+  (if (re-matches #"^[\*#].*" line)
     (str "," line)
     line))
 
@@ -289,8 +287,9 @@
    "\\checkmark" "✓"})
 
 (def ^:private entity-pattern
-  "Pre-compiled regex alternation of all org entity keys, for single-pass replacement."
-  (re-pattern (str/join "|" (map #(java.util.regex.Pattern/quote %) (keys org-entities)))))
+  "Pre-compiled regex alternation of all org entity keys, sorted by descending length for safe matching."
+  (re-pattern (str/join "|" (map #(java.util.regex.Pattern/quote %)
+                                 (sort-by (comp - count) (keys org-entities))))))
 
 (defn replace-entities
   "Replace Org entities (\\name) with their Unicode equivalents in a single pass."
@@ -314,7 +313,7 @@
         indexed (index-lines lines)]
     (:result
      (reduce
-      (fn [{:keys [result in-block block-type remaining] :as acc} _]
+      (fn [{:keys [result in-block block-type block-end-pattern remaining] :as acc} _]
         (if (empty? remaining)
           acc
           (let [{:keys [line num] :as current} (first remaining)
@@ -324,28 +323,29 @@
             (cond
               ;; When inside a block, only check for the matching end
               (and in-block
-                   block-type
-                   (re-matches (re-pattern (str "(?i)^\\s*#\\+END_" block-type "\\s*$")) line))
-              {:result (conj result current), :remaining rest-lines, :in-block false, :block-type nil}
+                   block-end-pattern
+                   (re-matches block-end-pattern line))
+              {:result (conj result current), :remaining rest-lines, :in-block false, :block-type nil, :block-end-pattern nil}
 
               ;; When inside a block, don't check for other patterns - just add the line
               in-block
-              {:result (conj result current), :remaining rest-lines, :in-block true, :block-type block-type}
+              {:result (conj result current), :remaining rest-lines, :in-block true, :block-type block-type, :block-end-pattern block-end-pattern}
 
               ;; Not in a block - check for block start, then process normally
               :else
               (if-let [[_ btype] (re-matches generic-block-begin-pattern line)]
-                {:result (conj result current), :remaining rest-lines, :in-block true, :block-type btype}
+                {:result (conj result current), :remaining rest-lines, :in-block true, :block-type btype,
+                 :block-end-pattern (re-pattern (str "(?i)^\\s*#\\+END_" btype "\\s*$"))}
                 (if (or (nil? next-line) (not (should-append? line next-line false)))
-                  {:result (conj result current), :remaining rest-lines, :in-block false, :block-type nil}
+                  {:result (conj result current), :remaining rest-lines, :in-block false, :block-type nil, :block-end-pattern nil}
                   (let [trimmed-next    (str/trim next-line)
                         normalized-next (if (list-item? line)
                                           (str/replace trimmed-next #"\s+" " ")
                                           trimmed-next)
                         new-line        (str line " " normalized-next)
                         new-current     {:line new-line :num num}]
-                    {:result result, :remaining (cons new-current (rest rest-lines)), :in-block false, :block-type nil})))))))
-      {:result [], :remaining indexed, :in-block false, :block-type nil}
+                    {:result result, :remaining (cons new-current (rest rest-lines)), :in-block false, :block-type nil, :block-end-pattern nil})))))))
+      {:result [], :remaining indexed, :in-block false, :block-type nil, :block-end-pattern nil}
       (range (count lines))))))
 
 (defn unwrap-text [input]
@@ -364,7 +364,7 @@
                 (let [full (if (string? m) m (first m))
                       ph   (str prefix (swap! counter inc))]
                   (swap! all-matches assoc ph full)
-                  (str/replace s full ph)))
+                  (str/replace-first s full ph)))
               t
               matches)))
          text
@@ -481,7 +481,8 @@
     (-> text
         (str/replace "&" "&amp;")
         (str/replace "<" "&lt;")
-        (str/replace ">" "&gt;"))
+        (str/replace ">" "&gt;")
+        (str/replace "\"" "&quot;"))
     ""))
 
 (defn- upper-name [k] (str/upper-case (name k)))
@@ -489,7 +490,7 @@
 (defn- repeat-str
   "Repeat string s exactly n times. Returns empty string when n <= 0."
   [n s]
-  (apply str (repeat n s)))
+  (str/join (repeat n s)))
 
 (defn- prefix-lines
   "Prefix each line of content with the given string."
@@ -592,7 +593,7 @@
   [title]
   (-> title
       str/lower-case
-      (str/replace #"[^\w\s-]" "")  ; Remove special chars except spaces and hyphens
+      (str/replace #"[^\p{L}\p{N}\s-]" "")  ; Keep Unicode letters & digits
       str/trim
       (str/replace #"\s+" "-")))   ; Replace spaces with hyphens
 
@@ -893,7 +894,8 @@
   (loop [[{:keys [line]} & more :as remaining] indexed-lines
          collected []
          in-block false
-         block-type nil]
+         block-type nil
+         block-end-pattern nil]
     (cond
       (empty? remaining)
       [collected remaining]
@@ -909,17 +911,18 @@
       (and (not in-block)
            (re-matches generic-block-begin-pattern line))
       (let [[_ btype] (re-matches generic-block-begin-pattern line)]
-        (recur more (conj collected (first remaining)) true btype))
+        (recur more (conj collected (first remaining)) true btype
+               (re-pattern (str "(?i)^\\s*#\\+END_" btype "\\s*$"))))
 
       ;; Track block end
       (and in-block
-           block-type
-           (re-matches (re-pattern (str "(?i)^\\s*#\\+END_" block-type "\\s*$")) line))
-      (recur more (conj collected (first remaining)) false nil)
+           block-end-pattern
+           (re-matches block-end-pattern line))
+      (recur more (conj collected (first remaining)) false nil nil)
 
       ;; Inside a block - always include the line
       in-block
-      (recur more (conj collected (first remaining)) true block-type)
+      (recur more (conj collected (first remaining)) true block-type block-end-pattern)
 
       ;; Stop at list items (same or less indent) - only outside blocks
       (and (re-matches list-item-pattern line)
@@ -937,11 +940,11 @@
                 (and (not (re-matches #"^\s+.*$" (:line next-non-blank)))
                      (not (re-matches list-item-pattern (:line next-non-blank)))))
           [collected remaining]
-          (recur more (conj collected (first remaining)) false nil)))
+          (recur more (conj collected (first remaining)) false nil nil)))
 
       ;; Indented continuation lines (more than min-indent) are included
       (re-matches #"^\s+.*$" line)
-      (recur more (conj collected (first remaining)) false nil)
+      (recur more (conj collected (first remaining)) false nil nil)
 
       ;; Non-indented non-blank line ends the item (only outside blocks)
       :else
@@ -1060,11 +1063,10 @@
           [(make-node :table :rows rows :has-header false :line start-line-num) remaining])
 
         (re-matches table-pattern line)
-        (let [line-content (str/trim line)
-              row          (->> line-content
-                                (drop 1) (drop-last 1) (apply str)
-                                (#(str/split % #"\s*\|\s*"))
-                                (mapv str/trim))]
+        (let [row (->> (str/split (str/trim line) #"\|")
+                       rest        ; drop leading empty from split
+                       butlast     ; drop trailing empty from split
+                       (mapv str/trim))]
           (recur more (conj rows row) has-separator))
 
         :else
@@ -1220,8 +1222,8 @@
         (recur more nodes pending-affiliated 0)
 
         ;; Simple parsers: no affiliated keyword
-        (some (fn [[pred _]] (when (pred line) pred)) simple-line-parsers)
-        (let [[_ parser] (some (fn [pair] (when ((first pair) line) pair)) simple-line-parsers)
+        (some (fn [[pred _]] (pred line)) simple-line-parsers)
+        (let [[_ parser] (some (fn [[pred _ :as pair]] (when (pred line) pair)) simple-line-parsers)
               [rest-lines nodes'] (or (try-parse parser remaining nodes)
                                       [more nodes])]
           (recur rest-lines nodes' nil 0))
@@ -1553,25 +1555,21 @@ li > p { margin-top: 0.5em; }
   "Render a sequence of child nodes with smart spacing.
    Sections handle their own spacing via :blank-lines-before."
   [children fmt]
-  (let [indexed (map-indexed vector children)
-        rendered (for [[i child] indexed
+  (let [rendered (for [child children
                        :let [r (render-node child fmt)]
                        :when (not (str/blank? r))]
-                   {:index i :type (:type child) :rendered r})]
-    (loop [items rendered
-           result []]
-      (if (empty? items)
-        (str/join "" result)
-        (let [{:keys [type rendered]} (first items)
-              is-first (empty? result)
-              is-section (= type :section)]
-          (recur (rest items)
-                 (conj result
-                       (cond
-                         is-first rendered
-                         is-section (str "\n" rendered)
-                         (= fmt :html) (str "\n" rendered)
-                         :else (str "\n\n" rendered)))))))))
+                   {:type (:type child) :rendered r})]
+    (->> rendered
+         (reduce (fn [acc {:keys [type rendered]}]
+                   (if (empty? acc)
+                     rendered
+                     (str acc
+                          (cond
+                            (= type :section) "\n"
+                            (= fmt :html)     "\n"
+                            :else              "\n\n")
+                          rendered)))
+                 ""))))
 
 ;; #+OPTIONS parsing
 (defn parse-options-string
