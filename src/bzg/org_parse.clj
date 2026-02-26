@@ -81,18 +81,22 @@
 
 (defn parse-org-timestamp
   "Parse an Org timestamp string into ISO 8601 format.
-   <2025-01-15 Wed>          -> 2025-01-15
-   <2025-01-15 Wed 10:30>    -> 2025-01-15T10:30
-   <2025-01-15 Wed 10:30-12:00> -> 2025-01-15T10:30 (end time ignored for ISO)
-   [2025-01-15 Wed 10:30]    -> 2025-01-15T10:30 (inactive timestamp)"
+   <2025-01-15 Wed>             -> 2025-01-15
+   <2025-01-15 Wed 10:30>       -> 2025-01-15T10:30
+   <2025-01-15 Wed 10:30-12:00> -> 2025-01-15T10:30/2025-01-15T12:00
+   [2025-01-15 Wed 10:30]       -> 2025-01-15T10:30 (inactive timestamp)"
   [ts-str]
   (when-let [[_ & groups] (re-matches org-timestamp-pattern ts-str)]
     (let [;; Active timestamp groups: 0-6, Inactive: 7-13
-          [ay am ad ah amin _ _
-           iy im id ih imin _ _] groups
-          [y m d h min] (if ay [ay am ad ah amin] [iy im id ih imin])]
+          [ay am ad ah amin aeh aemin
+           iy im id ih imin _   _] groups
+          [y m d h min eh emin] (if ay [ay am ad ah amin aeh aemin]
+                                       [iy im id ih imin nil nil])]
       (if h
-        (str y "-" m "-" d "T" h ":" min)
+        (let [start (str y "-" m "-" d "T" h ":" min)]
+          (if eh
+            (str start "/" y "-" m "-" d "T" eh ":" emin)
+            start))
         (str y "-" m "-" d)))))
 
 (defn parse-planning-line
@@ -1817,9 +1821,11 @@ li > p { margin-top: 0.5em; }
                                      (str/join " "
                                                (keep (fn [[kw iso]]
                                                        (when iso
-                                                         (str "<span class=\"planning-keyword\">"
-                                                              (str/upper-case (name kw))
-                                                              ":</span> <time datetime=\"" iso "\">" iso "</time>")))
+                                                         (let [datetime (first (str/split iso #"/"))
+                                                               display (str/replace iso "/" "–")]
+                                                           (str "<span class=\"planning-keyword\">"
+                                                                (str/upper-case (name kw))
+                                                                ":</span> <time datetime=\"" datetime "\">" display "</time>"))))
                                                      [[:closed (:closed planning)]
                                                       [:deadline (:deadline planning)]
                                                       [:scheduled (:scheduled planning)]]))
@@ -1841,10 +1847,16 @@ li > p { margin-top: 0.5em; }
                               (str/join " "
                                         (keep (fn [[kw iso]]
                                                 (when iso
-                                                  (let [ts (if (str/includes? iso "T")
-                                                             (let [[d t] (str/split iso #"T")]
-                                                               (str "<" d " " t ">"))
-                                                             (str "<" iso ">"))]
+                                                  (let [ts (if (str/includes? iso "/")
+                                                             ;; Interval: 2025-01-15T10:30/2025-01-15T12:00
+                                                             (let [[start end] (str/split iso #"/")
+                                                                   [d t1] (str/split start #"T")
+                                                                   t2 (second (str/split end #"T"))]
+                                                               (str "<" d " " t1 "-" t2 ">"))
+                                                             (if (str/includes? iso "T")
+                                                               (let [[d t] (str/split iso #"T")]
+                                                                 (str "<" d " " t ">"))
+                                                               (str "<" iso ">")))]
                                                     (str (str/upper-case (name kw)) ": " ts))))
                                               ;; Canonical order
                                               [[:closed (:closed planning)]
