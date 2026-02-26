@@ -74,6 +74,48 @@
 (def ordered-list-pattern #"^\s*\d+[.)]\s+.*$")
 (def list-item-simple-pattern #"^\s*(?:[-+*]|\d+[.)])\s+.*$")
 
+;; Planning line (CLOSED, SCHEDULED, DEADLINE)
+(def org-timestamp-pattern #"<(\d{4})-(\d{2})-(\d{2})\s+\S+(?:\s+(\d{2}):(\d{2})(?:-(\d{2}):(\d{2}))?)?>|\[(\d{4})-(\d{2})-(\d{2})\s+\S+(?:\s+(\d{2}):(\d{2})(?:-(\d{2}):(\d{2}))?)?\]")
+(def planning-keyword-pattern #"^(CLOSED|SCHEDULED|DEADLINE):\s*")
+(def planning-line-pattern #"^\s*((?:(?:CLOSED|SCHEDULED|DEADLINE):\s*(?:<[^>]+>|\[[^\]]+\])\s*)+)\s*$")
+
+(defn parse-org-timestamp
+  "Parse an Org timestamp string into ISO 8601 format.
+   <2025-01-15 Wed>          -> 2025-01-15
+   <2025-01-15 Wed 10:30>    -> 2025-01-15T10:30
+   <2025-01-15 Wed 10:30-12:00> -> 2025-01-15T10:30 (end time ignored for ISO)
+   [2025-01-15 Wed 10:30]    -> 2025-01-15T10:30 (inactive timestamp)"
+  [ts-str]
+  (when-let [[_ & groups] (re-matches org-timestamp-pattern ts-str)]
+    (let [;; Active timestamp groups: 0-6, Inactive: 7-13
+          [ay am ad ah amin _ _
+           iy im id ih imin _ _] groups
+          [y m d h min] (if ay [ay am ad ah amin] [iy im id ih imin])]
+      (if h
+        (str y "-" m "-" d "T" h ":" min)
+        (str y "-" m "-" d)))))
+
+(defn parse-planning-line
+  "Parse a planning information line into a map.
+   Returns {:closed \"2025-01-15\" :scheduled \"2025-01-15T10:30\" :deadline \"2025-02-01\"} or nil."
+  [line]
+  (when (re-matches planning-line-pattern line)
+    (let [remaining (str/trim line)]
+      (loop [s remaining result {}]
+        (if (str/blank? s)
+          (when (seq result) result)
+          (if-let [[_ kw] (re-find planning-keyword-pattern s)]
+            (let [after-kw (str/replace-first s planning-keyword-pattern "")
+                  ;; Extract the timestamp (active or inactive)
+                  ts-match (or (re-find #"^<[^>]+>" after-kw)
+                               (re-find #"^\[[^\]]+\]" after-kw))]
+              (if ts-match
+                (let [iso (parse-org-timestamp ts-match)
+                      rest-str (str/trim (subs after-kw (count ts-match)))]
+                  (recur rest-str (assoc result (keyword (str/lower-case kw)) iso)))
+                (when (seq result) result)))
+            (when (seq result) result)))))))
+
 ;; Keywords that affect document rendering
 (def rendering-keywords
   #{"title" "author" "date" "subtitle" "email" "language"
@@ -106,6 +148,7 @@
 (defn unordered-list-item? [line] (re-matches unordered-list-pattern line))
 (defn ordered-list-item? [line] (re-matches ordered-list-pattern line))
 (defn footnote-def? [line] (re-matches footnote-def-pattern line))
+(defn planning-line? [line] (re-matches planning-line-pattern line))
 (defn html-line? [line] (re-matches html-line-pattern line))
 (defn latex-line? [line] (re-matches latex-line-pattern line))
 (defn property-line? [line]
@@ -165,6 +208,8 @@
       (metadata-line? next-line)
       (property-line? current-line)
       (property-line? next-line)
+      (planning-line? current-line)
+      (planning-line? next-line)
       (list-item? next-line)
       (and (list-item? current-line)
            (list-item? next-line))))
@@ -1190,7 +1235,8 @@
                 (footnote-def? line)
                 (html-line? line)
                 (latex-line? line)
-                (affiliated-keyword? line))
+                (affiliated-keyword? line)
+                (planning-line? line))
           (when (seq content)
             [(make-node :paragraph :content (str/join "\n" content)
                         :line start-line-num) remaining])
@@ -1301,7 +1347,12 @@
              ;; so parent can assign it to the next sibling
              [sections remaining blanks-before]
              (let [new-path-stack                       (update-path-stack path-stack level title)
-                   [_ properties rest-after-props]      (parse-property-drawer more)
+                   ;; Parse optional planning line (CLOSED, SCHEDULED, DEADLINE)
+                   [planning rest-after-planning]
+                   (if (and (seq more) (planning-line? (:line (first more))))
+                     [(parse-planning-line (:line (first more))) (rest more)]
+                     [nil more])
+                   [_ properties rest-after-props]      (parse-property-drawer rest-after-planning)
                    ;; Count blank lines immediately after headline/properties (before content)
                    [blanks-after-title rest-after-title-blanks]
                    (loop [lines rest-after-props n 0]
@@ -1321,6 +1372,7 @@
                                           :todo todo
                                           :priority priority
                                           :tags tags
+                                          :planning planning
                                           :properties properties
                                           :path new-path-stack
                                           :line num
@@ -1513,7 +1565,9 @@ li > p { margin-top: 0.5em; }
 .footnote-ref, .footnote-inline { text-decoration: none; }
 .footnote-inline { cursor: help; border-bottom: 1px dotted #666; }
 .warning { background: #fff3cd; padding: 0.5em; border-left: 4px solid #ffc107; margin: 1em 0; }
-.note { background: #d1ecf1; padding: 0.5em; border-left: 4px solid #17a2b8; margin: 1em 0; }")
+.note { background: #d1ecf1; padding: 0.5em; border-left: 4px solid #17a2b8; margin: 1em 0; }
+.planning { color: #666; font-size: 0.9em; margin: 0.2em 0 0.5em 0; }
+.planning-keyword { font-weight: bold; }")
 
 (defn html-template [title content]
   (str "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
@@ -1747,10 +1801,24 @@ li > p { margin-top: 0.5em; }
                 priority-html (when (:priority node)
                                 (str "<span class=\"priority\">[#" (:priority node) "]</span> "))
                 tags-html (when (seq (:tags node))
-                            (str " <span class=\"tags\">:" (str/join ":" (:tags node)) ":</span>"))]
+                            (str " <span class=\"tags\">:" (str/join ":" (:tags node)) ":</span>"))
+                planning (:planning node)
+                planning-html (when (seq planning)
+                                (str "<div class=\"planning\">"
+                                     (str/join " "
+                                               (keep (fn [[kw iso]]
+                                                       (when iso
+                                                         (str "<span class=\"planning-keyword\">"
+                                                              (str/upper-case (name kw))
+                                                              ":</span> <time datetime=\"" iso "\">" iso "</time>")))
+                                                     [[:closed (:closed planning)]
+                                                      [:deadline (:deadline planning)]
+                                                      [:scheduled (:scheduled planning)]]))
+                                     "</div>"))]
             (str "<section id=\"" section-id "\">\n<" tag ">"
                  sec-num-html todo-html priority-html (format-text-html (:title node)) tags-html
                  "</" tag ">\n"
+                 (when planning-html (str planning-html "\n"))
                  (render-children (:children node) fmt) "\n</section>"))
     :org (let [blanks-before (repeat-str (or (:blank-lines-before node) 0) "\n")
                blanks-after-title (repeat-str (or (:blank-lines-after-title node) 0) "\n")
@@ -1759,10 +1827,25 @@ li > p { margin-top: 0.5em; }
                priority-str (when (:priority node) (str "[#" (:priority node) "] "))
                sec-num-str (when-let [sn (:section-number node)] (str sn " "))
                tags-str (when (seq (:tags node)) (str " :" (str/join ":" (:tags node)) ":"))
+               planning (:planning node)
+               planning-str (when (seq planning)
+                              (str/join " "
+                                        (keep (fn [[kw iso]]
+                                                (when iso
+                                                  (let [ts (if (str/includes? iso "T")
+                                                             (let [[d t] (str/split iso #"T")]
+                                                               (str "<" d " " t ">"))
+                                                             (str "<" iso ">"))]
+                                                    (str (str/upper-case (name kw)) ": " ts))))
+                                              ;; Canonical order
+                                              [[:closed (:closed planning)]
+                                               [:deadline (:deadline planning)]
+                                               [:scheduled (:scheduled planning)]])))
                props-str (render-properties-org (:properties node))
                children-str (render-children (:children node) fmt)]
            (str blanks-before
                 stars " " todo-str priority-str sec-num-str (:title node) tags-str
+                (when (seq planning-str) (str "\n" planning-str))
                 (when props-str (str "\n" props-str))
                 blanks-after-title
                 (when (seq children-str) (str "\n" children-str))))
@@ -1773,11 +1856,22 @@ li > p { margin-top: 0.5em; }
           priority-str (when (:priority node) (str "[#" (:priority node) "] "))
           sec-num-str (when-let [sn (:section-number node)] (str sn " "))
           tags-str (when (seq (:tags node)) (str " `:" (str/join ":" (:tags node)) ":`"))
+          planning (:planning node)
+          planning-str (when (seq planning)
+                         (str/join " "
+                                   (keep (fn [[kw iso]]
+                                           (when iso
+                                             (str "**" (str/upper-case (name kw)) ":** " iso)))
+                                         [[:closed (:closed planning)]
+                                          [:deadline (:deadline planning)]
+                                          [:scheduled (:scheduled planning)]])))
           heading (str (repeat-str (:level node) "#") " "
                        todo-str priority-str sec-num-str
                        (format-text :md (:title node))
                        tags-str)]
-      (str blanks-before heading "\n" blanks-after-title (render-children (:children node) fmt)))))
+      (str blanks-before heading "\n"
+           (when (seq planning-str) (str planning-str "\n"))
+           blanks-after-title (render-children (:children node) fmt)))))
 
 (defn- render-paragraph [node fmt]
   (case fmt
