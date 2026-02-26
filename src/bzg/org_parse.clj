@@ -75,7 +75,7 @@
 (def list-item-simple-pattern #"^\s*(?:[-+*]|\d+[.)])\s+.*$")
 
 ;; Planning line (CLOSED, SCHEDULED, DEADLINE)
-(def org-timestamp-pattern #"<(\d{4})-(\d{2})-(\d{2})\s+\S+(?:\s+(\d{2}):(\d{2})(?:-(\d{2}):(\d{2}))?)?>|\[(\d{4})-(\d{2})-(\d{2})\s+\S+(?:\s+(\d{2}):(\d{2})(?:-(\d{2}):(\d{2}))?)?\]")
+(def org-timestamp-pattern #"<(\d{4})-(\d{2})-(\d{2})\s+\S+(?:\s+(\d{1,2}):(\d{2})(?:-(\d{1,2}):(\d{2}))?)?>|\[(\d{4})-(\d{2})-(\d{2})\s+\S+(?:\s+(\d{1,2}):(\d{2})(?:-(\d{1,2}):(\d{2}))?)?\]")
 (def planning-keyword-pattern #"^(CLOSED|SCHEDULED|DEADLINE):\s*")
 (def planning-line-pattern #"^\s*((?:(?:CLOSED|SCHEDULED|DEADLINE):\s*(?:<[^>]+>|\[[^\]]+\])\s*)+)\s*$")
 
@@ -83,19 +83,20 @@
   "Parse an Org timestamp string into ISO 8601 format.
    <2025-01-15 Wed>             -> 2025-01-15
    <2025-01-15 Wed 10:30>       -> 2025-01-15T10:30
-   <2025-01-15 Wed 10:30-12:00> -> 2025-01-15T10:30/2025-01-15T12:00
+   <2025-01-15 Wed 9:30-12:00>  -> 2025-01-15T09:30/2025-01-15T12:00
    [2025-01-15 Wed 10:30]       -> 2025-01-15T10:30 (inactive timestamp)"
   [ts-str]
   (when-let [[_ & groups] (re-matches org-timestamp-pattern ts-str)]
-    (let [;; Active timestamp groups: 0-6, Inactive: 7-13
+    (let [pad2 #(if (= 1 (count %)) (str "0" %) %)
+          ;; Active timestamp groups: 0-6, Inactive: 7-13
           [ay am ad ah amin aeh aemin
            iy im id ih imin _   _] groups
           [y m d h min eh emin] (if ay [ay am ad ah amin aeh aemin]
                                        [iy im id ih imin nil nil])]
       (if h
-        (let [start (str y "-" m "-" d "T" h ":" min)]
+        (let [start (str y "-" m "-" d "T" (pad2 h) ":" min)]
           (if eh
-            (str start "/" y "-" m "-" d "T" eh ":" emin)
+            (str start "/" y "-" m "-" d "T" (pad2 eh) ":" emin)
             start))
         (str y "-" m "-" d)))))
 
@@ -2106,6 +2107,142 @@ li > p { margin-top: 0.5em; }
                       (recur more counters (conj result child))))))]
         (assoc ast :children (number-children (:children ast) {}))))))
 
+;; ICS Export
+(defn- ics-fold-line
+  "Fold a content line per RFC 5545 (max 75 octets per line)."
+  [line]
+  (if (<= (count (.getBytes line "UTF-8")) 75)
+    line
+    (loop [remaining line first? true parts []]
+      (if (empty? remaining)
+        (str/join "\r\n " parts)
+        (let [max-bytes (if first? 75 74) ;; continuation lines: space takes 1 byte
+              ;; Take chars one by one until we hit the byte limit
+              chunk (loop [i 1]
+                      (if (> i (count remaining))
+                        remaining
+                        (let [s (subs remaining 0 i)]
+                          (if (> (count (.getBytes s "UTF-8")) max-bytes)
+                            (subs remaining 0 (dec i))
+                            (recur (inc i))))))]
+          (recur (subs remaining (count chunk)) false (conj parts chunk)))))))
+
+(defn- ics-escape
+  "Escape text for ICS property values per RFC 5545."
+  [s]
+  (-> s
+      (str/replace "\\" "\\\\")
+      (str/replace "," "\\,")
+      (str/replace ";" "\\;")
+      (str/replace "\n" "\\n")))
+
+(defn- iso-to-ics-datetime
+  "Convert ISO timestamp (2025-01-15T10:30) to ICS datetime (20250115T103000).
+   For intervals (2025-01-15T10:30/2025-01-15T12:00), returns [dtstart dtend].
+   For date-only (2025-01-15), returns VALUE=DATE format (20250115)."
+  [iso]
+  (let [to-ics (fn [s]
+                 (if (str/includes? s "T")
+                   (let [[d t] (str/split s #"T")
+                         date (str/replace d "-" "")
+                         time (str (str/replace t ":" "") "00")]
+                     (str date "T" time))
+                   (str/replace s "-" "")))]
+    (if (str/includes? iso "/")
+      (let [[start end] (str/split iso #"/")]
+        {:dtstart (to-ics start) :dtend (to-ics end)})
+      {:dtstart (to-ics iso)})))
+
+(defn- collect-ics-items
+  "Walk the AST and collect sections that have :scheduled or :deadline planning."
+  [node]
+  (let [items (atom [])]
+    (letfn [(walk [n path]
+              (let [is-section (= (:type n) :section)
+                    new-path (if is-section (conj path (:title n)) path)]
+                (when is-section
+                  (let [planning (:planning n)
+                        title (:title n)
+                        todo (:todo n)]
+                    (when (:scheduled planning)
+                      (swap! items conj {:ics-type :vevent
+                                         :title title
+                                         :path new-path
+                                         :todo todo
+                                         :timestamp (:scheduled planning)}))
+                    (when (and (:deadline planning) todo)
+                      (swap! items conj {:ics-type :vtodo
+                                         :title title
+                                         :path new-path
+                                         :todo todo
+                                         :timestamp (:deadline planning)}))))
+                (doseq [child (:children n)]
+                  (walk child new-path))))]
+      (walk node [])
+      @items)))
+
+(defn- uid-for-item
+  "Generate a deterministic UID from item properties."
+  [item index]
+  (let [hash (Math/abs (.hashCode (str (:title item) (:timestamp item) index)))]
+    (str hash "@org-parse")))
+
+(defn render-ast-as-ics
+  "Export scheduled items as VEVENT and deadline+TODO items as VTODO."
+  [ast]
+  (let [items (collect-ics-items ast)
+        now (let [fmt (java.time.format.DateTimeFormatter/ofPattern "yyyyMMdd'T'HHmmss")]
+              (.format (java.time.LocalDateTime/now) fmt))
+        components
+        (map-indexed
+         (fn [idx item]
+           (let [{:keys [ics-type title todo timestamp]} item
+                 uid (uid-for-item item idx)
+                 ts (iso-to-ics-datetime timestamp)
+                 dtstart (:dtstart ts)
+                 is-date (not (str/includes? dtstart "T"))
+                 summary (if (and todo (= ics-type :vtodo))
+                           (str (name todo) " " title)
+                           title)]
+             (case ics-type
+               :vevent
+               (str/join "\r\n"
+                         (concat
+                          ["BEGIN:VEVENT"
+                           (ics-fold-line (str "UID:" uid))
+                           (str "DTSTAMP:" now)]
+                          (if is-date
+                            [(str "DTSTART;VALUE=DATE:" dtstart)
+                             (str "DTEND;VALUE=DATE:" dtstart)]
+                            (if-let [dtend (:dtend ts)]
+                              [(str "DTSTART:" dtstart)
+                               (str "DTEND:" dtend)]
+                              [(str "DTSTART:" dtstart)
+                               (str "DTEND:" dtstart)]))
+                          [(ics-fold-line (str "SUMMARY:" (ics-escape summary)))
+                           "END:VEVENT"]))
+
+               :vtodo
+               (str/join "\r\n"
+                         (concat
+                          ["BEGIN:VTODO"
+                           (ics-fold-line (str "UID:" uid))
+                           (str "DTSTAMP:" now)]
+                          (if is-date
+                            [(str "DUE;VALUE=DATE:" dtstart)]
+                            [(str "DUE:" dtstart)])
+                          [(ics-fold-line (str "SUMMARY:" (ics-escape summary)))
+                           (str "STATUS:" (if (= todo :DONE) "COMPLETED" "NEEDS-ACTION"))
+                           "END:VTODO"])))))
+         items)]
+    (str/join "\r\n"
+              (concat
+               ["BEGIN:VCALENDAR"
+                "VERSION:2.0"
+                "PRODID:-//org-parse//EN"]
+               components
+               ["END:VCALENDAR"]))))
+
 (defn render-ast-as-markdown [ast] (render-node (number-sections ast) :md))
 (defn render-ast-as-html [ast] (render-node (number-sections ast) :html))
 (defn render-ast-as-org [ast] (render-node (number-sections ast) :org))
@@ -2254,8 +2391,8 @@ li > p { margin-top: 0.5em; }
 ;; CLI Options
 (def cli-options
   [["-h" "--help" "Show help"]
-   ["-f" "--format FORMAT" "Output format: json, edn, yaml, md, html, or org"
-    :default "json" :validate [#{"json" "edn" "yaml" "md" "html" "org"} "Must be: json, edn, yaml, md, html, org"]]
+   ["-f" "--format FORMAT" "Output format: json, edn, yaml, md, html, org, or ics"
+    :default "json" :validate [#{"json" "edn" "yaml" "md" "html" "org" "ics"} "Must be: json, edn, yaml, md, html, org, ics"]]
    ["-r" "--render FORMAT" "Content rendering format in AST output: md, html, or org"
     :default "md" :validate [#{"md" "html" "org"} "Must be: md, html, org"]]
    ["-s" "--stats" "Compute and display document statistics"]
@@ -2340,6 +2477,10 @@ li > p { margin-top: 0.5em; }
 
               (= output-format "org")
               (println (render-ast-as-org cleaned-ast))
+
+              (= output-format "ics")
+              (do (print (render-ast-as-ics filtered-ast))
+                  (flush))
 
               :else
               (let [rendered-ast (render-ast-content cleaned-ast render-format)]
