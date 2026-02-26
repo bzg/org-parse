@@ -468,13 +468,22 @@
     node))
 
 ;; Text Formatting
+;; Text Formatting
+;; Emphasis patterns: conservative matching to avoid false positives.
+;; For bold/italic/underline/strike:
+;; - Pre-char must be start-of-string or non-word char
+;; - First and last char inside must be word chars
+;; - Content must not contain the marker char (no nesting)
+;; For code/verbatim (=, ~):
+;; - Same boundary rules, but inner content allows any non-whitespace
+;;   since these are literal/verbatim spans
 (def format-patterns
-  {:bold      #"(?<![^\s\p{Punct}])\*([^\*\s](?:[^\*]*[^\*\s])?)\*(?![^\s\p{Punct}])"
-   :italic    #"(?<![^\s\p{Punct}])/([^/\s](?:[^/]*[^/\s])?)/(?![^\s\p{Punct}])"
-   :underline #"(?<![^\s\p{Punct}])_([^_\s](?:[^_]*[^_\s])?)_(?![^\s\p{Punct}])"
-   :strike    #"(?<![^\s\p{Punct}])\+([^\+\s](?:[^\+]*[^\+\s])?)\+(?![^\s\p{Punct}])"
-   :code      #"(?<![^\s\p{Punct}])~([^~\s](?:[^~]*[^~\s])?)~(?![^\s\p{Punct}])"
-   :verbatim  #"(?<![^\s\p{Punct}])=([^=\s](?:[^=]*[^=\s])?)=(?![^\s\p{Punct}])"})
+  {:bold      #"(?<=^|[\s\p{Punct}])\*(\w[^\*]*?\w|\w)\*(?=$|[\s\p{Punct}])"
+   :italic    #"(?<=^|[\s\p{Punct}])/(\w[^/]*?\w|\w)/(?=$|[\s\p{Punct}])"
+   :underline #"(?<=^|[\s\p{Punct}])_(\w[^_]*?\w|\w)_(?=$|[\s\p{Punct}])"
+   :strike    #"(?<=^|[\s\p{Punct}])\+(\w[^\+]*?\w|\w)\+(?=$|[\s\p{Punct}])"
+   :code      #"(?<=^|[\s\p{Punct}])~([^~\s](?:[^~]*[^~\s])?)~(?=$|[\s\p{Punct}])"
+   :verbatim  #"(?<=^|[\s\p{Punct}])=([^=\s](?:[^=]*[^=\s])?)=(?=$|[\s\p{Punct}])"})
 
 (defn escape-html [text]
   (if (some? text)
@@ -687,12 +696,12 @@
          (str "[" display "](" href ")"))))))
 
 (def md-format-replacements
-  [[:bold "**$1**"]
+  [[:code "`$1`"]
+   [:verbatim "`$1`"]
+   [:bold "**$1**"]
    [:italic "*$1*"]
    [:underline "_$1_"]
-   [:strike "~~$1~~"]
-   [:code "`$1`"]
-   [:verbatim "`$1`"]])
+   [:strike "~~$1~~"]])
 
 (defn apply-format-patterns [text replacements]
   (reduce (fn [t [k repl]] (str/replace t (format-patterns k) repl))
@@ -710,10 +719,19 @@
           ;; Protect the newly created markdown links from emphasis processing
           [link-protected link-restore] (protect-patterns with-links [[#"\[[^\]]+\]\([^)]+\)" "ORG-LINK-"]])
           ;; Now apply emphasis patterns safely
-          formatted (-> link-protected
-                        (apply-format-patterns md-format-replacements)
+          ;; Process code/verbatim first
+          with-code (-> link-protected
+                        (str/replace (:code format-patterns) "`$1`")
+                        (str/replace (:verbatim format-patterns) "`$1`"))
+          ;; Protect backtick code from further emphasis processing
+          [code-protected code-restore] (protect-patterns with-code [[#"`[^`]+`" "ORG-CODE-"]])
+          formatted (-> code-protected
+                        (apply-format-patterns [[:bold "**$1**"]
+                                                [:italic "*$1*"]
+                                                [:underline "_$1_"]
+                                                [:strike "~~$1~~"]])
                         (str/replace footnote-ref-pattern "[^$1]"))]
-      (restore (link-restore formatted)))
+      (restore (link-restore (code-restore formatted))))
     ""))
 
 (defn format-footnote-html
@@ -749,17 +767,21 @@
           [protected restore] (protect-patterns with-links [[#"<a\s[^>]*>[^<]*</a>" "HTML-LINK-"]
                                                             [#"\{\{\{.+?\}\}\}" "HTML-MACRO-"]])
           ;; Now apply emphasis patterns safely, then handle footnotes
-          formatted (-> protected
+          ;; Process code/verbatim first so their content is protected
+          with-code (-> protected
+                        (str/replace (:code format-patterns) "<code>$1</code>")
+                        (str/replace (:verbatim format-patterns) "<code>$1</code>"))
+          ;; Protect code tags from further emphasis processing
+          [code-protected code-restore] (protect-patterns with-code [[#"<code>[^<]*</code>" "HTML-CODE-"]])
+          formatted (-> code-protected
                         (str/replace (:bold format-patterns) "<strong>$1</strong>")
                         (str/replace (:italic format-patterns) "<em>$1</em>")
                         (str/replace (:underline format-patterns) "<u>$1</u>")
                         (str/replace (:strike format-patterns) "<del>$1</del>")
-                        (str/replace (:code format-patterns) "<code>$1</code>")
-                        (str/replace (:verbatim format-patterns) "<code>$1</code>")
                         ;; Handle inline footnotes first (they have :content), then regular refs
                         (str/replace footnote-inline-pattern format-footnote-html)
                         (str/replace footnote-ref-pattern format-footnote-html))]
-      (restore formatted))
+      (restore (code-restore formatted)))
     ""))
 
 (defn extract-single-image-link
