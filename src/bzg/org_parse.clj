@@ -2427,7 +2427,7 @@ li > p { margin-top: 0.5em; }
 (defn usage [summary]
   (str/join \newline
             ["Org AST Parser - Parse Org files into AST"
-             "" "Usage: org-ast.clj [options] <org-file>"
+             "" "Usage: org-parse [options] <org-file>"
              "" "Options:" summary]))
 
 (defn- exit-error
