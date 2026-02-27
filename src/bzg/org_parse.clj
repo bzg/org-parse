@@ -427,7 +427,9 @@
                 (let [full (if (string? m) m (first m))
                       ph   (str prefix (swap! counter inc))]
                   (swap! all-matches assoc ph full)
-                  (str/replace-first s full ph)))
+                  (str/replace-first s
+                    (re-pattern (java.util.regex.Pattern/quote full))
+                    (java.util.regex.Matcher/quoteReplacement ph))))
               t
               matches)))
          text
