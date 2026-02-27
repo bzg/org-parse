@@ -533,7 +533,6 @@
     node))
 
 ;; Text Formatting
-;; Text Formatting
 ;; Emphasis patterns: conservative matching to avoid false positives.
 ;; For bold/italic/underline/strike:
 ;; - Pre-char must be start-of-string or non-word char
@@ -641,7 +640,7 @@
          (map (fn [[k v]]
                 (when (non-blank? (str v))
                   (str " " (name k) "=\"" (escape-html (str v)) "\""))))
-         (apply str))))
+         (str/join))))
 
 (defn render-image-html
   "Render an image tag with optional affiliated attributes.
@@ -909,10 +908,8 @@
          meta {} order [] raw []]
     (if (nil? l)
       [(assoc meta :_order order :_raw raw) remaining]
-      (cond
-        (re-matches metadata-pattern line)
-        (let [[_ key value] (re-matches metadata-pattern line)
-              kw       (keyword (str/lower-case key))
+      (if-let [[_ key value] (re-matches metadata-pattern line)]
+        (let [kw       (keyword (str/lower-case key))
               kw-str   (str/lower-case key)]
           ;; Only keep metadata that affects rendering
           (if (contains? metadata-rendering-keywords kw-str)
@@ -928,12 +925,9 @@
                      (conj raw line)))
             ;; Skip non-rendering metadata lines
             (recur more meta order raw)))
-
-        (str/blank? line)
-        (recur more meta order raw)
-
-        :else
-        [(assoc meta :_order order :_raw raw) remaining]))))
+        (if (str/blank? line)
+          (recur more meta order raw)
+          [(assoc meta :_order order :_raw raw) remaining])))))
 
 (defn parse-property-drawer [indexed-lines]
   (if (and (seq indexed-lines)
