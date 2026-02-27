@@ -60,7 +60,6 @@
 (def html-line-pattern #"(?i)^\s*#\+html:\s*(.*)$")
 (def latex-line-pattern #"(?i)^\s*#\+latex:\s*(.*)$")
 (def block-begin-pattern #"(?i)^\s*#\+BEGIN.*$")
-(def block-end-pattern #"(?i)^\s*#\+END.*$")
 (def continuation-pattern #"^\s+\S.*$")
 (def fixed-width-pattern #"^\s*: (.*)$")
 (def footnote-ref-pattern #"\[fn:([^\]:]+)\]")
@@ -70,8 +69,6 @@
 (def link-without-desc-pattern #"\[\[([^\]]+)\]\]")
 (def link-type-pattern #"^(file|id|mailto|http|https|ftp|news|shell|elisp|doi):(.*)$")
 (def affiliated-keyword-pattern #"(?i)^\s*#\+(attr_\w+|caption|name|header|results):\s*(.*)$")
-(def unordered-list-pattern #"^\s*[-+*]\s+.*$")
-(def ordered-list-pattern #"^\s*\d+[.)]\s+.*$")
 (def list-item-simple-pattern #"^\s*(?:[-+*]|\d+[.)])\s+.*$")
 
 ;; Planning line (CLOSED, SCHEDULED, DEADLINE)
@@ -164,9 +161,6 @@
 (defn fixed-width-line? [line] (re-matches fixed-width-pattern line))
 (defn table-line? [line] (re-matches table-pattern line))
 (defn block-begin? [line] (re-matches block-begin-pattern line))
-(defn block-end? [line] (re-matches block-end-pattern line))
-(defn unordered-list-item? [line] (re-matches unordered-list-pattern line))
-(defn ordered-list-item? [line] (re-matches ordered-list-pattern line))
 (defn footnote-def? [line] (re-matches footnote-def-pattern line))
 (defn planning-line? [line] (re-matches planning-line-pattern line))
 (defn html-line? [line] (re-matches html-line-pattern line))
@@ -410,9 +404,6 @@
                     {:result result, :remaining (cons new-current (rest rest-lines)), :in-block false, :block-type nil, :block-end-pattern nil})))))))
       {:result [], :remaining indexed, :in-block false, :block-type nil, :block-end-pattern nil}
       (range (count lines))))))
-
-(defn unwrap-text [input]
-  (str/join "\n" (map :line (unwrap-text-indexed input))))
 
 ;; Format Protection Framework
 (defn protect-patterns [text patterns]
@@ -758,14 +749,6 @@
        (let [href    (resolve-href link-type target url)
              display (resolve-display link-type target url desc)]
          (str "[" display "](" href ")"))))))
-
-(def md-format-replacements
-  [[:code "`$1`"]
-   [:verbatim "`$1`"]
-   [:bold "**$1**"]
-   [:italic "*$1*"]
-   [:underline "_$1_"]
-   [:strike "~~$1~~"]])
 
 (defn apply-format-patterns [text replacements]
   (reduce (fn [t [k repl]] (str/replace t (format-patterns k) repl))
