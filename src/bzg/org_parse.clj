@@ -2316,7 +2316,8 @@ li > p { margin-top: 0.5em; }
    Matches [[path/to/image.png]] or [[path/to/image.png][description]]"
   [s]
   (if (non-blank? s)
-    (let [links (re-seq #"\[\[([^\]]+)\](?:\[[^\]]*\])?\]" s)]
+    (let [links (concat (re-seq link-with-desc-pattern s)
+                        (re-seq link-without-desc-pattern s))]
       (count (filter (fn [[_ target]] (image-url? target)) links)))
     0))
 
