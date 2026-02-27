@@ -182,13 +182,6 @@
     (subs line 1)
     line))
 
-(defn unescape-block-content
-  "Remove comma escapes from all lines in block content."
-  [content]
-  (->> (str/split-lines content)
-       (map unescape-comma)
-       (str/join "\n")))
-
 (defn escape-comma
   "Add leading comma to escape lines that need it inside blocks.
    Lines starting with * or #+ need escaping."
@@ -197,12 +190,18 @@
     (str "," line)
     line))
 
-(defn escape-block-content
+(defn- transform-block-lines
+  "Apply a per-line transform to block content."
+  [f content]
+  (->> (str/split-lines content) (map f) (str/join "\n")))
+
+(def unescape-block-content
+  "Remove comma escapes from all lines in block content."
+  (partial transform-block-lines unescape-comma))
+
+(def escape-block-content
   "Add comma escapes to lines that need it in block content."
-  [content]
-  (->> (str/split-lines content)
-       (map escape-comma)
-       (str/join "\n")))
+  (partial transform-block-lines escape-comma))
 
 ;; Text Unwrapping
 (defn hard-break? [current-line next-line in-block]
@@ -355,13 +354,6 @@
   [text]
   (str/replace text entity-pattern #(get org-entities % %)))
 
-(defn should-append? [current-line next-line in-block]
-  (cond
-    (hard-break? current-line next-line in-block) false
-    (and (list-item? current-line)
-         (continuation-line? next-line)) true
-    :else true))
-
 (defn unwrap-text-indexed
   "Unwrap text while preserving original line numbers.
    Returns a vector of {:line string :num original-line-number} maps."
@@ -393,7 +385,7 @@
               (if-let [[_ btype] (re-matches generic-block-begin-pattern line)]
                 {:result (conj result current), :remaining rest-lines, :in-block true, :block-type btype,
                  :block-end-pattern (re-pattern (str "(?i)^\\s*#\\+END_" btype "\\s*$"))}
-                (if (or (nil? next-line) (not (should-append? line next-line false)))
+                (if (or (nil? next-line) (hard-break? line next-line false))
                   {:result (conj result current), :remaining rest-lines, :in-block false, :block-type nil, :block-end-pattern nil}
                   (let [trimmed-next    (str/trim next-line)
                         normalized-next (if (list-item? line)
@@ -1674,8 +1666,7 @@ li > p { margin-top: 0.5em; }
 (defn get-export-options
   "Extract parsed export options from the AST metadata."
   [ast]
-  (let [options-str (get-in ast [:meta :options])]
-    (parse-options-string options-str)))
+  (parse-options-string (get-in ast [:meta :options])))
 
 (defn- collect-toc-entries
   "Recursively collect TOC entries from section nodes up to max-depth.
@@ -1733,22 +1724,16 @@ li > p { margin-top: 0.5em; }
                                 (recur more level))))))
                   _ (.append sb "</nav>")]
               (.toString sb))
-      :org (let [items (str/join "\n"
-                                 (map (fn [{:keys [level title section-number]}]
-                                        (let [indent (repeat-str (* 2 (dec level)) " ")
-                                              num-str (when section-number (str section-number " "))]
-                                          (str indent "- " num-str title)))
-                                      entries))]
-             (str items))
-      ;; default: markdown
-      (let [items (str/join "\n"
-                            (map (fn [{:keys [level title section-number]}]
-                                   (let [indent (repeat-str (* 2 (dec level)) " ")
-                                         num-str (when section-number (str section-number " "))
-                                         slug (heading-to-slug title)]
-                                     (str indent "- [" num-str (format-text :md title) "](#" slug ")")))
-                                 entries))]
-        (str items)))))
+      ;; org and markdown
+      (str/join "\n"
+                (map (fn [{:keys [level title section-number]}]
+                       (let [indent (repeat-str (* 2 (dec level)) " ")
+                             num-str (when section-number (str section-number " "))
+                             label (if (= fmt :org)
+                                     (str num-str title)
+                                     (str "[" num-str (format-text :md title) "](#" (heading-to-slug title) ")"))]
+                         (str indent "- " label)))
+                     entries)))))
 
 (defn- render-document [node fmt level]
   (let [options (parse-options-string (get-in node [:meta :options]))
@@ -1796,114 +1781,114 @@ li > p { margin-top: 0.5em; }
              (when toc-str (str toc-str "\n\n"))
              (render-children (:children node) fmt))))))
 
+(def ^:private planning-order
+  "Canonical order for planning keywords."
+  [:closed :deadline :scheduled])
+
+(defn- planning-repeaters
+  "Build repeater map from a planning map."
+  [planning]
+  (zipmap planning-order
+          (map #(get planning (keyword (str (name %) "-repeat"))) planning-order)))
+
+(defn- planning-items
+  "Return [[kw iso] ...] pairs in canonical order, filtering nil values."
+  [planning]
+  (keep (fn [kw] (when-let [iso (get planning kw)] [kw iso])) planning-order))
+
+(defn- render-planning
+  "Render planning info (CLOSED/SCHEDULED/DEADLINE) in the given format."
+  [planning fmt]
+  (when (seq planning)
+    (let [repeaters (planning-repeaters planning)
+          items (planning-items planning)]
+      (when (seq items)
+        (case fmt
+          :html (str "<div class=\"planning\">"
+                     (str/join " "
+                               (map (fn [[kw iso]]
+                                      (let [rep (get repeaters kw)
+                                            datetime (first (str/split iso #"/"))
+                                            display (cond-> (str/replace iso "/" "–")
+                                                      rep (str " " rep))]
+                                        (str "<span class=\"planning-keyword\">"
+                                             (str/upper-case (name kw))
+                                             ":</span> <time datetime=\"" datetime "\">" display "</time>")))
+                                    items))
+                     "</div>")
+          :org (str/join " "
+                         (map (fn [[kw iso]]
+                                (let [rep (get repeaters kw)
+                                      rep-str (if rep (str " " rep) "")
+                                      ts (if (str/includes? iso "/")
+                                           (let [[start end] (str/split iso #"/")
+                                                 [d t1] (str/split start #"T")
+                                                 t2 (second (str/split end #"T"))]
+                                             (str "<" d " " t1 "-" t2 rep-str ">"))
+                                           (if (str/includes? iso "T")
+                                             (let [[d t] (str/split iso #"T")]
+                                               (str "<" d " " t rep-str ">"))
+                                             (str "<" iso rep-str ">")))]
+                                  (str (str/upper-case (name kw)) ": " ts)))
+                              items))
+          ;; markdown
+          (str/join " "
+                    (map (fn [[kw iso]]
+                           (let [rep (get repeaters kw)
+                                 display (if rep (str iso " " rep) iso)]
+                             (str "**" (str/upper-case (name kw)) ":** " display)))
+                         items)))))))
+
 (defn- render-section [node fmt]
-  (case fmt
-    :html (let [lvl (min (:level node) max-heading-level)
-                tag (str "h" lvl)
-                section-id (or (get-in node [:properties :custom_id])
-                               (heading-to-slug (:title node)))
-                sec-num-html (when-let [sn (:section-number node)]
-                               (str "<span class=\"section-number\">" sn "</span> "))
-                todo-html (when (:todo node)
-                            (str "<span class=\"todo " (str/lower-case (name (:todo node))) "\">"
-                                 (name (:todo node)) "</span> "))
-                priority-html (when (:priority node)
-                                (str "<span class=\"priority\">[#" (:priority node) "]</span> "))
-                tags-html (when (seq (:tags node))
-                            (str " <span class=\"tags\">:" (str/join ":" (:tags node)) ":</span>"))
-                planning (:planning node)
-                planning-html (when (seq planning)
-                                (let [repeaters {:closed (:closed-repeat planning)
-                                                 :deadline (:deadline-repeat planning)
-                                                 :scheduled (:scheduled-repeat planning)}]
-                                  (str "<div class=\"planning\">"
-                                       (str/join " "
-                                                 (keep (fn [[kw iso]]
-                                                         (when iso
-                                                           (let [rep (get repeaters kw)
-                                                                 datetime (first (str/split iso #"/"))
-                                                                 display (cond-> (str/replace iso "/" "–")
-                                                                           rep (str " " rep))]
-                                                             (str "<span class=\"planning-keyword\">"
-                                                                  (str/upper-case (name kw))
-                                                                  ":</span> <time datetime=\"" datetime "\">" display "</time>"))))
-                                                       [[:closed (:closed planning)]
-                                                        [:deadline (:deadline planning)]
-                                                        [:scheduled (:scheduled planning)]]))
-                                       "</div>")))]
-            (str "<section id=\"" section-id "\">\n<" tag ">"
-                 sec-num-html todo-html priority-html (format-text-html (:title node)) tags-html
-                 "</" tag ">\n"
-                 (when planning-html (str planning-html "\n"))
-                 (render-children (:children node) fmt) "\n</section>"))
-    :org (let [blanks-before (repeat-str (or (:blank-lines-before node) 0) "\n")
-               blanks-after-title (repeat-str (or (:blank-lines-after-title node) 0) "\n")
-               stars (repeat-str (:level node) "*")
-               todo-str (when (:todo node) (str (name (:todo node)) " "))
-               priority-str (when (:priority node) (str "[#" (:priority node) "] "))
-               sec-num-str (when-let [sn (:section-number node)] (str sn " "))
-               tags-str (when (seq (:tags node)) (str " :" (str/join ":" (:tags node)) ":"))
-               planning (:planning node)
-               planning-str (when (seq planning)
-                              (let [repeaters {:closed (:closed-repeat planning)
-                                               :deadline (:deadline-repeat planning)
-                                               :scheduled (:scheduled-repeat planning)}]
-                                (str/join " "
-                                          (keep (fn [[kw iso]]
-                                                  (when iso
-                                                    (let [rep (get repeaters kw)
-                                                          rep-str (if rep (str " " rep) "")
-                                                          ts (if (str/includes? iso "/")
-                                                               ;; Interval: 2025-01-15T10:30/2025-01-15T12:00
-                                                               (let [[start end] (str/split iso #"/")
-                                                                     [d t1] (str/split start #"T")
-                                                                     t2 (second (str/split end #"T"))]
-                                                                 (str "<" d " " t1 "-" t2 rep-str ">"))
-                                                               (if (str/includes? iso "T")
-                                                                 (let [[d t] (str/split iso #"T")]
-                                                                   (str "<" d " " t rep-str ">"))
-                                                                 (str "<" iso rep-str ">")))]
-                                                      (str (str/upper-case (name kw)) ": " ts))))
-                                                ;; Canonical order
-                                                [[:closed (:closed planning)]
-                                                 [:deadline (:deadline planning)]
-                                                 [:scheduled (:scheduled planning)]]))))
-               props-str (render-properties-org (:properties node))
-               children-str (render-children (:children node) fmt)]
-           (str blanks-before
-                stars " " todo-str priority-str sec-num-str (:title node) tags-str
-                (when (seq planning-str) (str "\n" planning-str))
-                (when props-str (str "\n" props-str))
-                blanks-after-title
-                (when (seq children-str) (str "\n" children-str))))
-    ;; default: markdown
-    (let [blanks-before (repeat-str (or (:blank-lines-before node) 0) "\n")
-          blanks-after-title (repeat-str (or (:blank-lines-after-title node) 0) "\n")
-          todo-str (when (:todo node) (str "**" (name (:todo node)) "** "))
-          priority-str (when (:priority node) (str "[#" (:priority node) "] "))
-          sec-num-str (when-let [sn (:section-number node)] (str sn " "))
-          tags-str (when (seq (:tags node)) (str " `:" (str/join ":" (:tags node)) ":`"))
-          planning (:planning node)
-          planning-str (when (seq planning)
-                         (let [repeaters {:closed (:closed-repeat planning)
-                                          :deadline (:deadline-repeat planning)
-                                          :scheduled (:scheduled-repeat planning)}]
-                           (str/join " "
-                                     (keep (fn [[kw iso]]
-                                             (when iso
-                                               (let [rep (get repeaters kw)
-                                                     display (if rep (str iso " " rep) iso)]
-                                                 (str "**" (str/upper-case (name kw)) ":** " display))))
-                                           [[:closed (:closed planning)]
-                                            [:deadline (:deadline planning)]
-                                            [:scheduled (:scheduled planning)]]))))
-          heading (str (repeat-str (:level node) "#") " "
-                       todo-str priority-str sec-num-str
-                       (format-text :md (:title node))
-                       tags-str)]
-      (str blanks-before heading "\n"
-           (when (seq planning-str) (str planning-str "\n"))
-           blanks-after-title (render-children (:children node) fmt)))))
+  (let [planning-str (render-planning (:planning node) fmt)]
+    (case fmt
+      :html (let [lvl (min (:level node) max-heading-level)
+                  tag (str "h" lvl)
+                  section-id (or (get-in node [:properties :custom_id])
+                                 (heading-to-slug (:title node)))
+                  sec-num-html (when-let [sn (:section-number node)]
+                                 (str "<span class=\"section-number\">" sn "</span> "))
+                  todo-html (when (:todo node)
+                              (str "<span class=\"todo " (str/lower-case (name (:todo node))) "\">"
+                                   (name (:todo node)) "</span> "))
+                  priority-html (when (:priority node)
+                                  (str "<span class=\"priority\">[#" (:priority node) "]</span> "))
+                  tags-html (when (seq (:tags node))
+                              (str " <span class=\"tags\">:" (str/join ":" (:tags node)) ":</span>"))]
+              (str "<section id=\"" section-id "\">\n<" tag ">"
+                   sec-num-html todo-html priority-html (format-text-html (:title node)) tags-html
+                   "</" tag ">\n"
+                   (when planning-str (str planning-str "\n"))
+                   (render-children (:children node) fmt) "\n</section>"))
+      :org (let [blanks-before (repeat-str (or (:blank-lines-before node) 0) "\n")
+                 blanks-after-title (repeat-str (or (:blank-lines-after-title node) 0) "\n")
+                 stars (repeat-str (:level node) "*")
+                 todo-str (when (:todo node) (str (name (:todo node)) " "))
+                 priority-str (when (:priority node) (str "[#" (:priority node) "] "))
+                 sec-num-str (when-let [sn (:section-number node)] (str sn " "))
+                 tags-str (when (seq (:tags node)) (str " :" (str/join ":" (:tags node)) ":"))
+                 props-str (render-properties-org (:properties node))
+                 children-str (render-children (:children node) fmt)]
+             (str blanks-before
+                  stars " " todo-str priority-str sec-num-str (:title node) tags-str
+                  (when planning-str (str "\n" planning-str))
+                  (when props-str (str "\n" props-str))
+                  blanks-after-title
+                  (when (seq children-str) (str "\n" children-str))))
+      ;; default: markdown
+      (let [blanks-before (repeat-str (or (:blank-lines-before node) 0) "\n")
+            blanks-after-title (repeat-str (or (:blank-lines-after-title node) 0) "\n")
+            todo-str (when (:todo node) (str "**" (name (:todo node)) "** "))
+            priority-str (when (:priority node) (str "[#" (:priority node) "] "))
+            sec-num-str (when-let [sn (:section-number node)] (str sn " "))
+            tags-str (when (seq (:tags node)) (str " `:" (str/join ":" (:tags node)) ":`"))
+            heading (str (repeat-str (:level node) "#") " "
+                         todo-str priority-str sec-num-str
+                         (format-text :md (:title node))
+                         tags-str)]
+        (str blanks-before heading "\n"
+             (when planning-str (str planning-str "\n"))
+             blanks-after-title (render-children (:children node) fmt))))))
 
 (defn- render-paragraph [node fmt]
   (case fmt
@@ -2341,11 +2326,16 @@ li > p { margin-top: 0.5em; }
                                   (:scheduled planning) (inc-stat :scheduled)
                                   (:deadline planning)  (inc-stat :deadline)
                                   (:closed planning)    (inc-stat :closed)))
-                     :paragraph (let [{:keys [words images]} (content-stats node)]
-                                  (-> child-stats
-                                      (inc-stat :paragraphs)
-                                      (add-stat :words words)
-                                      (add-stat :images images)))
+                     (:paragraph :quote-block :footnote-def)
+                     (let [{:keys [words images]} (content-stats node)
+                           stat-key (case node-type
+                                      :paragraph :paragraphs
+                                      :quote-block :quote-blocks
+                                      :footnote-def :footnotes)]
+                       (-> child-stats
+                           (inc-stat stat-key)
+                           (add-stat :words words)
+                           (add-stat :images images)))
                      :table (inc-stat child-stats :tables)
                      :list (inc-stat child-stats :lists)
                      :list-item (-> child-stats
@@ -2356,19 +2346,9 @@ li > p { margin-top: 0.5em; }
                                     (add-stat :images (+ (count-images (:content node))
                                                          (count-images (:definition node)))))
                      :src-block (inc-stat child-stats :src-blocks)
-                     :quote-block (let [{:keys [words images]} (content-stats node)]
-                                    (-> child-stats
-                                        (inc-stat :quote-blocks)
-                                        (add-stat :words words)
-                                        (add-stat :images images)))
                      :block (inc-stat child-stats :blocks)
                      :comment (inc-stat child-stats :comments)
                      :fixed-width (inc-stat child-stats :fixed-width)
-                     :footnote-def (let [{:keys [words images]} (content-stats node)]
-                                     (-> child-stats
-                                         (inc-stat :footnotes)
-                                         (add-stat :words words)
-                                         (add-stat :images images)))
                      :html-line (inc-stat child-stats :html-lines)
                      :latex-line (inc-stat child-stats :latex-lines)
                      :property-drawer (inc-stat child-stats :property-drawers)
