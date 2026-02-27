@@ -977,59 +977,62 @@
          in-block false
          block-type nil
          block-end-pattern nil]
-    (cond
-      (empty? remaining)
-      [collected remaining]
+    (let [block-begin-match (when (and line (not in-block))
+                              (re-matches generic-block-begin-pattern line))
+          li-match (when (and line (not in-block))
+                     (re-matches list-item-pattern line))]
+      (cond
+        (empty? remaining)
+        [collected remaining]
 
-      (nil? line)
-      [collected remaining]
+        (nil? line)
+        [collected remaining]
 
-      ;; Stop at headlines (but only outside blocks)
-      (and (not in-block) (headline? line))
-      [collected remaining]
+        ;; Stop at headlines (but only outside blocks)
+        (and (not in-block) (headline? line))
+        [collected remaining]
 
-      ;; Track block start
-      (and (not in-block)
-           (re-matches generic-block-begin-pattern line))
-      (let [[_ btype] (re-matches generic-block-begin-pattern line)]
-        (recur more (conj collected (first remaining)) true btype
-               (re-pattern (str "(?i)^\\s*#\\+END_" btype "\\s*$"))))
+        ;; Track block start
+        block-begin-match
+        (let [[_ btype] block-begin-match]
+          (recur more (conj collected (first remaining)) true btype
+                 (re-pattern (str "(?i)^\\s*#\\+END_" btype "\\s*$"))))
 
-      ;; Track block end
-      (and in-block
-           block-end-pattern
-           (re-matches block-end-pattern line))
-      (recur more (conj collected (first remaining)) false nil nil)
+        ;; Track block end
+        (and in-block
+             block-end-pattern
+             (re-matches block-end-pattern line))
+        (recur more (conj collected (first remaining)) false nil nil)
 
-      ;; Inside a block - always include the line
-      in-block
-      (recur more (conj collected (first remaining)) true block-type block-end-pattern)
+        ;; Inside a block - always include the line
+        in-block
+        (recur more (conj collected (first remaining)) true block-type block-end-pattern)
 
-      ;; Stop at list items (same or less indent) - only outside blocks
-      (and (re-matches list-item-pattern line)
-           (let [[_ indent _ _] (re-matches list-item-pattern line)]
-             (<= (count indent) min-indent)))
-      [collected remaining]
+        ;; Stop at list items (same or less indent) - only outside blocks
+        (and li-match
+             (let [[_ indent _ _] li-match]
+               (<= (count indent) min-indent)))
+        [collected remaining]
 
-      ;; Blank lines: only consume if a continuation follows (indented line or deeper list item).
-      ;; If what follows is a headline or non-indented content, stop and leave blanks unconsumed
-      ;; so parse-content can count them as trailing-blanks.
-      (str/blank? line)
-      (let [next-non-blank (first (drop-while #(str/blank? (:line %)) more))]
-        (if (or (nil? next-non-blank)
-                (headline? (:line next-non-blank))
-                (and (not (re-matches #"^\s+.*$" (:line next-non-blank)))
-                     (not (re-matches list-item-pattern (:line next-non-blank)))))
-          [collected remaining]
-          (recur more (conj collected (first remaining)) false nil nil)))
+        ;; Blank lines: only consume if a continuation follows (indented line or deeper list item).
+        ;; If what follows is a headline or non-indented content, stop and leave blanks unconsumed
+        ;; so parse-content can count them as trailing-blanks.
+        (str/blank? line)
+        (let [next-non-blank (first (drop-while #(str/blank? (:line %)) more))]
+          (if (or (nil? next-non-blank)
+                  (headline? (:line next-non-blank))
+                  (and (not (re-matches #"^\s+.*$" (:line next-non-blank)))
+                       (not (re-matches list-item-pattern (:line next-non-blank)))))
+            [collected remaining]
+            (recur more (conj collected (first remaining)) false nil nil)))
 
-      ;; Indented continuation lines (more than min-indent) are included
-      (re-matches #"^\s+.*$" line)
-      (recur more (conj collected (first remaining)) false nil nil)
+        ;; Indented continuation lines (more than min-indent) are included
+        (re-matches #"^\s+.*$" line)
+        (recur more (conj collected (first remaining)) false nil nil)
 
-      ;; Non-indented non-blank line ends the item (only outside blocks)
-      :else
-      [collected remaining])))
+        ;; Non-indented non-blank line ends the item (only outside blocks)
+        :else
+        [collected remaining]))))
 
 (defn- list-item-match
   "Parse a list item line, returning [indent marker content] or nil."
