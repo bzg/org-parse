@@ -366,8 +366,6 @@
     (hard-break? current-line next-line in-block) false
     (and (list-item? current-line)
          (continuation-line? next-line)) true
-    (and (re-matches #"^\s+.*" next-line)
-         (not (continuation-line? next-line))) false
     :else true))
 
 (defn unwrap-text-indexed
