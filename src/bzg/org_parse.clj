@@ -2210,8 +2210,11 @@ li > p { margin-top: 0.5em; }
 (defn- uid-for-item
   "Generate a deterministic UID from item properties."
   [item index]
-  (let [hash (Math/abs (.hashCode (str (:title item) (:timestamp item) index)))]
-    (str hash "@org-parse")))
+  (let [input (str (:title item) (:timestamp item) index)
+        bytes (.digest (java.security.MessageDigest/getInstance "SHA-256")
+                       (.getBytes input "UTF-8"))
+        hex (str/join (map #(format "%02x" %) bytes))]
+    (str (subs hex 0 16) "@org-parse")))
 
 (defn- org-repeater-to-rrule
   "Convert Org repeater cookie to ICS RRULE string.
