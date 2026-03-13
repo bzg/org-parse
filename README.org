@@ -40,6 +40,10 @@ If you don't need the full AST, you can apply some filtering:
 :   org-parse -I "chapter\d+" notes.org       # Filter: ancestor ID or CUSTOM_ID matches regex
 :   org-parse -m 2 -i "^ch" notes.org         # Combine filters (all must match)
 
+If you need to prepend a base URL to relative links:
+
+:   org-parse -b https://base.io -f html index.org # Add base-URL to relative links
+
 Display stats:
 
 :   org-parse -s notes.org                    # Display basic stats about notes.org

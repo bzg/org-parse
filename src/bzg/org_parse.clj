@@ -17,6 +17,7 @@
 (def max-heading-level 6)
 
 (def ^:dynamic *parse-errors* nil)
+(def ^:dynamic *base-url* nil)
 
 (defn add-parse-error! [line-num message]
   (when *parse-errors*
@@ -91,7 +92,7 @@
           [ay am ad ah amin aeh aemin
            iy im id ih imin _   _] groups
           [y m d h min eh emin] (if ay [ay am ad ah amin aeh aemin]
-                                       [iy im id ih imin nil nil])]
+                                    [iy im id ih imin nil nil])]
       (if h
         (let [start (str y "-" m "-" d "T" (pad2 h) ":" min)]
           (if eh
@@ -129,7 +130,7 @@
                       kw-key (keyword (str/lower-case kw))
                       rest-str (str/trim (subs after-kw (count ts-match)))]
                   (recur rest-str (cond-> (assoc result kw-key iso)
-                                   repeater (assoc (keyword (str (str/lower-case kw) "-repeat")) repeater))))
+                                    repeater (assoc (keyword (str (str/lower-case kw) "-repeat")) repeater))))
                 (when (seq result) result)))
             (when (seq result) result)))))))
 
@@ -411,8 +412,8 @@
                       ph   (str prefix (swap! counter inc))]
                   (swap! all-matches assoc ph full)
                   (str/replace-first s
-                    (re-pattern (java.util.regex.Pattern/quote full))
-                    (java.util.regex.Matcher/quoteReplacement ph))))
+                                     (re-pattern (java.util.regex.Pattern/quote full))
+                                     (java.util.regex.Matcher/quoteReplacement ph))))
               t
               matches)))
          text
@@ -653,16 +654,27 @@
       str/trim
       (str/replace #"\s+" "-")))   ; Replace spaces with hyphens
 
+(defn- prepend-base-url
+  "Prepend *base-url* to href when it is a relative path."
+  [href]
+  (if (and *base-url*
+           (not (str/starts-with? href "/"))
+           (not (str/starts-with? href "#"))
+           (not (re-find #"^[a-zA-Z][a-zA-Z0-9+.-]*:" href)))
+    (str *base-url* href)
+    href))
+
 (defn- resolve-href
   "Resolve a link target to a URL string given its type."
   [link-type target url]
-  (case link-type
-    :file          target
-    (:id
-     :custom-id)  (str "#" target)
-    :heading       (str "#" (heading-to-slug target))
-    :mailto        (str "mailto:" target)
-    url))
+  (prepend-base-url
+   (case link-type
+     :file          (str/replace target #"\.org$" ".html")
+     (:id
+      :custom-id)  (str "#" target)
+     :heading       (str "#" (heading-to-slug target))
+     :mailto        (str "mailto:" target)
+     url)))
 
 (defn- resolve-display
   "Resolve the display text for a link, given an optional explicit description."
@@ -2072,8 +2084,8 @@ li > p { margin-top: 0.5em; }
    (e.g. '1', '1.1', '2.3.1') based on its level and position among siblings.
    Only applied when the document has num:t in #+OPTIONS (default: false)."
   [ast]
-   (let [options (get-export-options ast)
-         num? (get options :num false)]
+  (let [options (get-export-options ast)
+        num? (get options :num false)]
     (if-not num?
       ast
       (letfn [(number-children [children counters]
@@ -2422,7 +2434,8 @@ li > p { margin-top: 0.5em; }
    ["-m" "--max-level LEVEL" "Filter: level <= LEVEL"
     :parse-fn #(Integer/parseInt %) :validate [pos? "Must be positive"]]
    ["-M" "--max-level-all LEVEL" "Filter: level <= LEVEL but render deeper headings as bold"
-    :parse-fn #(Integer/parseInt %) :validate [pos? "Must be positive"]]])
+    :parse-fn #(Integer/parseInt %) :validate [pos? "Must be positive"]]
+   ["-b" "--base-url URL" "Base URL prepended to relative links (include trailing slash)"]])
 
 (defn usage [summary]
   (str/join \newline
@@ -2464,49 +2477,51 @@ li > p { margin-top: 0.5em; }
                                (catch java.io.FileNotFoundException _
                                  (exit-error (str "File not found - " file-path)))))]
         (try
-          (let [unwrap? (not (:no-unwrap options))
-                ast (parse-org org-content {:unwrap? unwrap?})
-                filter-opts {:max-level (:max-level options)
-                             :max-level-all (:max-level-all options)
-                             :title-pattern (:title options)
-                             :id-pattern (:id options)
-                             :section-title-pattern (:section-title options)
-                             :section-id-pattern (:section-id options)}
-                filtered-ast (filter-ast ast filter-opts)
-                output-format (:format options)
-                render-format (keyword (:render options))
-                is-org-output (= output-format "org")
-                cleaned-ast (if is-org-output filtered-ast (clean-ast filtered-ast))]
-            ;; Report parse errors to stderr if any
-            (when-let [errs (:parse-errors cleaned-ast)]
-              (binding [*out* *err*]
-                (doseq [{:keys [line message]} errs]
-                  (println (str "Warning (line " line "): " message)))))
-            (cond
-              (:stats options)
-              (let [stats (compute-stats filtered-ast)]
-                (println (format-stats stats)))
+          (binding [*base-url* (when-let [u (:base-url options)]
+                                 (cond-> u (not (str/ends-with? u "/")) (str "/")))]
+            (let [unwrap? (not (:no-unwrap options))
+                  ast (parse-org org-content {:unwrap? unwrap?})
+                  filter-opts {:max-level (:max-level options)
+                               :max-level-all (:max-level-all options)
+                               :title-pattern (:title options)
+                               :id-pattern (:id options)
+                               :section-title-pattern (:section-title options)
+                               :section-id-pattern (:section-id options)}
+                  filtered-ast (filter-ast ast filter-opts)
+                  output-format (:format options)
+                  render-format (keyword (:render options))
+                  is-org-output (= output-format "org")
+                  cleaned-ast (if is-org-output filtered-ast (clean-ast filtered-ast))]
+              ;; Report parse errors to stderr if any
+              (when-let [errs (:parse-errors cleaned-ast)]
+                (binding [*out* *err*]
+                  (doseq [{:keys [line message]} errs]
+                    (println (str "Warning (line " line "): " message)))))
+              (cond
+                (:stats options)
+                (let [stats (compute-stats filtered-ast)]
+                  (println (format-stats stats)))
 
-              (= output-format "md")
-              (println (render-ast-as-markdown cleaned-ast))
+                (= output-format "md")
+                (println (render-ast-as-markdown cleaned-ast))
 
-              (= output-format "html")
-              (println (render-ast-as-html cleaned-ast))
+                (= output-format "html")
+                (println (render-ast-as-html cleaned-ast))
 
-              (= output-format "org")
-              (println (render-ast-as-org cleaned-ast))
+                (= output-format "org")
+                (println (render-ast-as-org cleaned-ast))
 
-              (= output-format "ics")
-              (do (print (render-ast-as-ics filtered-ast))
-                  (flush))
+                (= output-format "ics")
+                (do (print (render-ast-as-ics filtered-ast))
+                    (flush))
 
-              :else
-              (let [rendered-ast (render-ast-content cleaned-ast render-format)]
-                (case output-format
-                  "json" (println (format-ast-as-json rendered-ast))
-                  "edn" (println (format-ast-as-edn rendered-ast))
-                  "yaml" (println (format-ast-as-yaml rendered-ast)))))
-            (System/exit 0))
+                :else
+                (let [rendered-ast (render-ast-content cleaned-ast render-format)]
+                  (case output-format
+                    "json" (println (format-ast-as-json rendered-ast))
+                    "edn" (println (format-ast-as-edn rendered-ast))
+                    "yaml" (println (format-ast-as-yaml rendered-ast)))))
+              (System/exit 0)))
           (catch clojure.lang.ExceptionInfo e
             (exit-error (str "Parse error: " (.getMessage e))))
           (catch Exception e
