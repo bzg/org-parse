@@ -1633,12 +1633,16 @@ li > p { margin-top: 0.5em; }
 (defn render-list-item [item index ordered level fmt]
   (let [indent (repeat-str (* level list-indent-width) " ")
         marker (if ordered (str (inc index) ". ") "- ")
-        content (if (:term item)
-                  (str (:term item) " :: " (or (:definition item) ""))
-                  (format-text fmt (:content item)))
         children-str (when (seq (:children item))
                        (str/join "\n" (map #(render-node % fmt (inc level)) (:children item))))]
-    (str indent marker content (when children-str (str "\n" children-str)))))
+    (if (and (:term item) (= fmt :md))
+      (str indent (format-text fmt (:term item)) "\n"
+           indent ":   " (format-text fmt (or (:definition item) ""))
+           (when children-str (str "\n" children-str)))
+      (let [content (if (:term item)
+                      (str (:term item) " :: " (or (:definition item) ""))
+                      (format-text fmt (:content item)))]
+        (str indent marker content (when children-str (str "\n" children-str)))))))
 
 (defn- render-children
   "Render a sequence of child nodes with smart spacing.
@@ -1932,9 +1936,10 @@ li > p { margin-top: 0.5em; }
                           :else "ul")
                 items-html (str/join "\n" (map #(render-node % fmt) (:items node)))]
             (str "<" tag ">\n" items-html "\n</" tag ">"))
-    (str/join "\n" (map-indexed
-                    (fn [idx item] (render-list-item item idx (:ordered node) level fmt))
-                    (:items node)))))
+    (let [sep (if (and (= fmt :md) (:description node)) "\n\n" "\n")]
+      (str/join sep (map-indexed
+                     (fn [idx item] (render-list-item item idx (:ordered node) level fmt))
+                     (:items node))))))
 
 (defn- render-list-item-node [node fmt level]
   (if (= fmt :html)
