@@ -4,16 +4,16 @@ Take an Org file and output it as data in json/yaml/edn format, or export it to 
 
 * Usage
 
+Parse as AST in JSON:
+
 :   org-parse notes.org                       # Output JSON with content rendered as Markdown
+
+Parse and display stats:
+
 :   org-parse -s notes.org                    # Display some stats on notes.org
 
-You can output the AST of an Org file to various formats:
-
-:   org-parse -f edn notes.org                # Output AST in EDN format
-:   org-parse -f yaml notes.org               # Output AST in YAML format
-
-By default, the contents of the AST is exported as Markdown, you can
-ask HTML or Org instead:
+By default the content of the AST node is exported as Markdown, you
+can ask for HTML or Org instead:
 
 :   org-parse -r html notes.org               # Output AST (as json) and render contents as HTML
 :   org-parse -r org notes.org                # Output AST (as json) and render contents as Org
@@ -21,8 +21,10 @@ ask HTML or Org instead:
 Instead of exporting the AST, you can export the entire file to
 Markdown, HTML or Org:
 
-:   org-parse -f md notes.org                 # Export the file as Markdown
-:   org-parse -f html notes.org               # Export the file as HTML
+:   org-parse -f md notes.org                 # Output AST in Markdown format
+:   org-parse -f edn notes.org                # Output AST in EDN format
+:   org-parse -f yaml notes.org               # Output AST in YAML format
+:   org-parse -f html notes.org               # Output AST in HTML format
 :   org-parse -f org notes.org                # Export as Org (unwrapped)
 
 By default, the contents are unwrapped, you can prevent this:
@@ -57,6 +59,13 @@ Assuming [[https://github.com/babashka/bbin][bbin]] is installed:
 #+begin_src sh
 bbin install io.github.bzg/org-parse
 #+end_src
+
+* Test
+
+You can test with:
+
+: ~$ bb test:generate
+: ~$ bb test
 
 * Feedback
 
