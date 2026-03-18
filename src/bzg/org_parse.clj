@@ -12,74 +12,74 @@
             [clj-yaml.core :as yaml]))
 
 ;; Constants
-(def min-table-cell-width 3)
-(def list-indent-width 2)
-(def max-heading-level 6)
+(def ^:private min-table-cell-width 3)
+(def ^:private list-indent-width 2)
+(def ^:private max-heading-level 6)
 
 (def ^:dynamic *parse-errors* nil)
 (def ^:dynamic *base-url* nil)
 
-(defn add-parse-error! [line-num message]
+(defn- add-parse-error! [line-num message]
   (when *parse-errors*
     (vswap! *parse-errors* conj {:line line-num :message message})))
 
-(defn empty-value?
+(defn- empty-value?
   "True if value is nil, empty collection, or blank string."
   [v]
   (or (nil? v)
       (and (coll? v) (empty? v))
       (and (string? v) (str/blank? v))))
 
-(defn remove-empty-vals
+(defn- remove-empty-vals
   "Remove entries with empty values from a map."
   [m]
   (into {} (remove (comp empty-value? val) m)))
 
-(defn make-node
+(defn- make-node
   "Create an AST node, filtering out empty values."
   [type & {:as fields}]
   (assoc (remove-empty-vals fields) :type type))
 
-(defn non-blank?
+(defn- non-blank?
   "True if s is a non-nil, non-blank string."
   [s]
   (and (some? s) (not (str/blank? s))))
 
 ;; Regex Patterns
-(def headline-full-pattern #"^(\*+)\s+(?:(TODO|DONE)\s+)?(?:\[#([A-Z])\]\s+)?(.+?)(?:\s+(:[:\w]+:))?\s*$")
-(def headline-pattern #"^(\*+)\s+(.*)$")
-(def property-drawer-start-pattern #"^\s*:PROPERTIES:\s*$")
-(def property-drawer-end-pattern #"^\s*:END:\s*$")
-(def property-pattern #"^\s*:([\w_-]+):\s*(.*)$")
-(def list-item-pattern #"^(\s*)(-|\+|\*|\d+[.)])\s+(.*)$")
-(def description-item-pattern #"^(.+?)\s+::(?:\s+(.*))?$")
-(def table-pattern #"^\s*\|.*\|\s*$")
-(def table-separator-pattern #"^\s*\|-.*\|\s*$")
-(def generic-block-begin-pattern #"(?i)^\s*#\+BEGIN_(\w+)(?:\s+(.*))?$")
-(def metadata-pattern #"^\s*#\+(\w+):\s*(.*)$")
-(def comment-pattern #"^\s*#(?!\+).*$")
-(def html-line-pattern #"(?i)^\s*#\+html:\s*(.*)$")
-(def latex-line-pattern #"(?i)^\s*#\+latex:\s*(.*)$")
-(def block-begin-pattern #"(?i)^\s*#\+BEGIN.*$")
-(def continuation-pattern #"^\s+\S.*$")
-(def fixed-width-pattern #"^\s*: (.*)$")
-(def footnote-ref-pattern #"\[fn:([^\]:]+)\]")
-(def footnote-inline-pattern #"\[fn:([^\]:]*):([^\]]+)\]")
-(def footnote-def-pattern #"^\[fn:([^\]]+)\]\s*(.*)$")
-(def link-with-desc-pattern #"\[\[([^\]]+)\]\[([^\]]+)\]\]")
-(def link-without-desc-pattern #"\[\[([^\]]+)\]\]")
-(def link-type-pattern #"^(file|id|mailto|http|https|ftp|news|shell|elisp|doi):(.*)$")
-(def affiliated-keyword-pattern #"(?i)^\s*#\+(attr_\w+|caption|name|header|results):\s*(.*)$")
-(def list-item-simple-pattern #"^\s*(?:[-+*]|\d+[.)])\s+.*$")
+(def ^:private headline-full-pattern #"^(\*+)\s+(?:(TODO|DONE)\s+)?(?:\[#([A-Z])\]\s+)?(.+?)(?:\s+(:[:\w]+:))?\s*$")
+(def ^:private headline-pattern #"^(\*+)\s+(.*)$")
+(def ^:private property-drawer-start-pattern #"^\s*:PROPERTIES:\s*$")
+(def ^:private property-drawer-end-pattern #"^\s*:END:\s*$")
+(def ^:private property-pattern #"^\s*:([\w_-]+):\s*(.*)$")
+(def ^:private list-item-pattern #"^(\s*)(-|\+|\*|\d+[.)])\s+(.*)$")
+(def ^:private description-item-pattern #"^(.+?)\s+::(?:\s+(.*))?$")
+(def ^:private table-pattern #"^\s*\|.*\|\s*$")
+(def ^:private table-separator-pattern #"^\s*\|-.*\|\s*$")
+(def ^:private generic-block-begin-pattern #"(?i)^\s*#\+BEGIN_(\w+)(?:\s+(.*))?$")
+(def ^:private metadata-pattern #"^\s*#\+(\w+):\s*(.*)$")
+(def ^:private comment-pattern #"^\s*#(?!\+).*$")
+(def ^:private html-line-pattern #"(?i)^\s*#\+html:\s*(.*)$")
+(def ^:private latex-line-pattern #"(?i)^\s*#\+latex:\s*(.*)$")
+(def ^:private block-begin-pattern #"(?i)^\s*#\+BEGIN.*$")
+(def ^:private continuation-pattern #"^\s+\S.*$")
+(def ^:private fixed-width-pattern #"^\s*: (.*)$")
+(def ^:private footnote-ref-pattern #"\[fn:([^\]:]+)\]")
+(def ^:private footnote-inline-pattern #"\[fn:([^\]:]*):([^\]]+)\]")
+(def ^:private footnote-def-pattern #"^\[fn:([^\]]+)\]\s*(.*)$")
+(def ^:private link-with-desc-pattern #"\[\[([^\]]+)\]\[([^\]]+)\]\]")
+(def ^:private link-without-desc-pattern #"\[\[([^\]]+)\]\]")
+(def ^:private link-type-pattern #"^(file|id|mailto|http|https|ftp|news|shell|elisp|doi):(.*)$")
+(def ^:private affiliated-keyword-pattern #"(?i)^\s*#\+(attr_\w+|caption|name|header|results):\s*(.*)$")
+(def ^:private list-item-simple-pattern #"^\s*(?:[-+*]|\d+[.)])\s+.*$")
 
 ;; Planning line (CLOSED, SCHEDULED, DEADLINE)
-(def org-timestamp-pattern #"<(\d{4})-(\d{2})-(\d{2})\s+\S+(?:\s+(\d{1,2}):(\d{2})(?:-(\d{1,2}):(\d{2}))?)?(?:\s+[.+]?[+]?\d+[hdwmy])*\s*>|\[(\d{4})-(\d{2})-(\d{2})\s+\S+(?:\s+(\d{1,2}):(\d{2})(?:-(\d{1,2}):(\d{2}))?)?(?:\s+[.+]?[+]?\d+[hdwmy])*\s*\]")
-(def org-repeater-pattern #"(?:^|[\s])([.+]?\+\d+[hdwmy])")
-(def org-warning-pattern #"(?:^|[\s])(-\d+[hdwmy])")
-(def planning-keyword-pattern #"^(CLOSED|SCHEDULED|DEADLINE):\s*")
-(def planning-line-pattern #"^\s*((?:(?:CLOSED|SCHEDULED|DEADLINE):\s*(?:<[^>]+>|\[[^\]]+\])\s*)+)\s*$")
+(def ^:private org-timestamp-pattern #"<(\d{4})-(\d{2})-(\d{2})\s+\S+(?:\s+(\d{1,2}):(\d{2})(?:-(\d{1,2}):(\d{2}))?)?(?:\s+[.+]?[+]?\d+[hdwmy])*\s*>|\[(\d{4})-(\d{2})-(\d{2})\s+\S+(?:\s+(\d{1,2}):(\d{2})(?:-(\d{1,2}):(\d{2}))?)?(?:\s+[.+]?[+]?\d+[hdwmy])*\s*\]")
+(def ^:private org-repeater-pattern #"(?:^|[\s])([.+]?\+\d+[hdwmy])")
+(def ^:private org-warning-pattern #"(?:^|[\s])(-\d+[hdwmy])")
+(def ^:private planning-keyword-pattern #"^(CLOSED|SCHEDULED|DEADLINE):\s*")
+(def ^:private planning-line-pattern #"^\s*((?:(?:CLOSED|SCHEDULED|DEADLINE):\s*(?:<[^>]+>|\[[^\]]+\])\s*)+)\s*$")
 
-(defn parse-org-timestamp
+(defn- parse-org-timestamp
   "Parse an Org timestamp string into ISO 8601 format.
    <2025-01-15 Wed>             -> 2025-01-15
    <2025-01-15 Wed 10:30>       -> 2025-01-15T10:30
@@ -100,7 +100,7 @@
             start))
         (str y "-" m "-" d)))))
 
-(defn parse-org-repeater
+(defn- parse-org-repeater
   "Extract repeater cookie from an Org timestamp string.
    <2025-01-15 Wed 10:30 +1w>    -> \"+1w\"
    <2025-01-15 Wed .+2d>         -> \".+2d\"
@@ -110,7 +110,7 @@
   (when-let [[_ repeater] (re-find org-repeater-pattern ts-str)]
     repeater))
 
-(defn parse-planning-line
+(defn- parse-planning-line
   "Parse a planning information line into a map.
    Returns {:closed \"2025-01-15\" :scheduled \"2025-01-15T10:30\" :scheduled-repeat \"+1w\"} or nil."
   [line]
@@ -134,21 +134,21 @@
                 (when (seq result) result)))
             (when (seq result) result)))))))
 
-;; Keywords that affect document rendering
-(def rendering-keywords
+;; Keywords that affect document rendering (used for affiliated/inline keywords)
+(def ^:private affiliated-rendering-keywords
   #{"title" "author" "date" "subtitle" "email" "language"
     "html" "latex" "caption" "name" "header" "results" "options"})
 
-(defn rendering-keyword?
+(defn- rendering-keyword?
   "Check if a #+keyword line affects rendering.
    Returns true for known rendering keywords and attr_* patterns."
   [line]
   (when-let [[_ kw _] (re-matches metadata-pattern line)]
     (let [kw-lower (str/lower-case kw)]
-      (or (contains? rendering-keywords kw-lower)
+      (or (contains? affiliated-rendering-keywords kw-lower)
           (str/starts-with? kw-lower "attr_")))))
 
-(defn ignored-keyword-line?
+(defn- ignored-keyword-line?
   "Check if a line is a #+ keyword that should be ignored (no rendering impact)."
   [line]
   (and (re-matches metadata-pattern line)
@@ -156,26 +156,26 @@
        (not (re-matches block-begin-pattern line))))
 
 ;; Line Type Predicates
-(defn headline? [line] (re-matches headline-pattern line))
-(defn metadata-line? [line] (re-matches metadata-pattern line))
-(defn comment-line? [line] (re-matches comment-pattern line))
-(defn fixed-width-line? [line] (re-matches fixed-width-pattern line))
-(defn table-line? [line] (re-matches table-pattern line))
-(defn block-begin? [line] (re-matches block-begin-pattern line))
-(defn footnote-def? [line] (re-matches footnote-def-pattern line))
-(defn planning-line? [line] (re-matches planning-line-pattern line))
-(defn html-line? [line] (re-matches html-line-pattern line))
-(defn latex-line? [line] (re-matches latex-line-pattern line))
-(defn property-line? [line]
+(defn- headline? [line] (re-matches headline-pattern line))
+(defn- metadata-line? [line] (re-matches metadata-pattern line))
+(defn- comment-line? [line] (re-matches comment-pattern line))
+(defn- fixed-width-line? [line] (re-matches fixed-width-pattern line))
+(defn- table-line? [line] (re-matches table-pattern line))
+(defn- block-begin? [line] (re-matches block-begin-pattern line))
+(defn- footnote-def? [line] (re-matches footnote-def-pattern line))
+(defn- planning-line? [line] (re-matches planning-line-pattern line))
+(defn- html-line? [line] (re-matches html-line-pattern line))
+(defn- latex-line? [line] (re-matches latex-line-pattern line))
+(defn- property-line? [line]
   (or (re-matches property-drawer-start-pattern line)
       (re-matches property-drawer-end-pattern line)
       (re-matches property-pattern line)))
-(defn list-item? [line] (re-matches list-item-simple-pattern line))
-(defn continuation-line? [line] (and (re-matches continuation-pattern line) (not (list-item? line))))
-(defn affiliated-keyword? [line] (re-matches affiliated-keyword-pattern line))
-(defn index-lines [lines] (map-indexed (fn [i line] {:line line :num (inc i)}) lines))
+(defn- list-item? [line] (re-matches list-item-simple-pattern line))
+(defn- continuation-line? [line] (and (re-matches continuation-pattern line) (not (list-item? line))))
+(defn- affiliated-keyword? [line] (re-matches affiliated-keyword-pattern line))
+(defn- index-lines [lines] (map-indexed (fn [i line] {:line line :num (inc i)}) lines))
 
-(defn unescape-comma
+(defn- unescape-comma
   "Remove leading comma escape from a line inside a block.
    A comma escapes lines starting with * or #+ inside blocks."
   [line]
@@ -183,7 +183,7 @@
     (subs line 1)
     line))
 
-(defn escape-comma
+(defn- escape-comma
   "Add leading comma to escape lines that need it inside blocks.
    Lines starting with * or #+ need escaping."
   [line]
@@ -196,16 +196,16 @@
   [f content]
   (->> (str/split-lines content) (map f) (str/join "\n")))
 
-(def unescape-block-content
+(def ^:private unescape-block-content
   "Remove comma escapes from all lines in block content."
   (partial transform-block-lines unescape-comma))
 
-(def escape-block-content
+(def ^:private escape-block-content
   "Add comma escapes to lines that need it in block content."
   (partial transform-block-lines escape-comma))
 
 ;; Text Unwrapping
-(defn hard-break? [current-line next-line in-block]
+(defn- hard-break? [current-line next-line in-block]
   (or in-block
       (str/blank? current-line)
       (str/blank? next-line)
@@ -224,12 +224,10 @@
       (property-line? next-line)
       (planning-line? current-line)
       (planning-line? next-line)
-      (list-item? next-line)
-      (and (list-item? current-line)
-           (list-item? next-line))))
+      (list-item? next-line)))
 
 ;; Org entities - maps \name to Unicode/ASCII equivalent
-(def org-entities
+(def ^:private org-entities
   {"\\alpha" "α"
    "\\beta" "β"
    "\\gamma" "γ"
@@ -350,56 +348,51 @@
   (re-pattern (str/join "|" (map #(java.util.regex.Pattern/quote %)
                                  (sort-by (comp - count) (keys org-entities))))))
 
-(defn replace-entities
+(defn- replace-entities
   "Replace Org entities (\\name) with their Unicode equivalents in a single pass."
   [text]
   (str/replace text entity-pattern #(get org-entities % %)))
 
-(defn unwrap-text-indexed
+(defn- unwrap-text-indexed
   "Unwrap text while preserving original line numbers.
    Returns a vector of {:line string :num original-line-number} maps."
   [input]
-  (let [lines (str/split-lines input)
-        indexed (index-lines lines)]
-    (:result
-     (reduce
-      (fn [{:keys [result in-block block-type block-end-pattern remaining] :as acc} _]
-        (if (empty? remaining)
-          acc
-          (let [{:keys [line num] :as current} (first remaining)
-                rest-lines (rest remaining)
-                next-item (first rest-lines)
-                next-line (:line next-item)]
-            (cond
-              ;; When inside a block, only check for the matching end
-              (and in-block
-                   block-end-pattern
-                   (re-matches block-end-pattern line))
-              {:result (conj result current), :remaining rest-lines, :in-block false, :block-type nil, :block-end-pattern nil}
+  (let [indexed (index-lines (str/split-lines input))]
+    (loop [result []
+           remaining indexed
+           in-block false
+           block-type nil
+           block-end-pattern nil]
+      (if (empty? remaining)
+        result
+        (let [{:keys [line num] :as current} (first remaining)
+              rest-lines (rest remaining)
+              next-line (:line (first rest-lines))]
+          (cond
+            ;; When inside a block, only check for the matching end
+            (and in-block block-end-pattern (re-matches block-end-pattern line))
+            (recur (conj result current) rest-lines false nil nil)
 
-              ;; When inside a block, don't check for other patterns - just add the line
-              in-block
-              {:result (conj result current), :remaining rest-lines, :in-block true, :block-type block-type, :block-end-pattern block-end-pattern}
+            ;; When inside a block, don't check for other patterns
+            in-block
+            (recur (conj result current) rest-lines true block-type block-end-pattern)
 
-              ;; Not in a block - check for block start, then process normally
-              :else
-              (if-let [[_ btype] (re-matches generic-block-begin-pattern line)]
-                {:result (conj result current), :remaining rest-lines, :in-block true, :block-type btype,
-                 :block-end-pattern (re-pattern (str "(?i)^\\s*#\\+END_" btype "\\s*$"))}
-                (if (or (nil? next-line) (hard-break? line next-line false))
-                  {:result (conj result current), :remaining rest-lines, :in-block false, :block-type nil, :block-end-pattern nil}
-                  (let [trimmed-next    (str/trim next-line)
-                        normalized-next (if (list-item? line)
-                                          (str/replace trimmed-next #"\s+" " ")
-                                          trimmed-next)
-                        new-line        (str line " " normalized-next)
-                        new-current     {:line new-line :num num}]
-                    {:result result, :remaining (cons new-current (rest rest-lines)), :in-block false, :block-type nil, :block-end-pattern nil})))))))
-      {:result [], :remaining indexed, :in-block false, :block-type nil, :block-end-pattern nil}
-      (range (count lines))))))
+            ;; Not in a block - check for block start
+            :else
+            (if-let [[_ btype] (re-matches generic-block-begin-pattern line)]
+              (recur (conj result current) rest-lines true btype
+                     (re-pattern (str "(?i)^\\s*#\\+END_" btype "\\s*$")))
+              (if (or (nil? next-line) (hard-break? line next-line false))
+                (recur (conj result current) rest-lines false nil nil)
+                (let [trimmed-next    (str/trim next-line)
+                      normalized-next (if (list-item? line)
+                                        (str/replace trimmed-next #"\s+" " ")
+                                        trimmed-next)
+                      new-current     {:line (str line " " normalized-next) :num num}]
+                  (recur result (cons new-current (rest rest-lines)) false nil nil))))))))))
 
 ;; Format Protection Framework
-(defn protect-patterns [text patterns]
+(defn- protect-patterns [text patterns]
   (let [counter     (atom 0)
         all-matches (atom {})
         protected
@@ -425,11 +418,11 @@
                @all-matches))]))
 
 ;; Parsing Helpers
-(defn parse-footnote-def [line]
+(defn- parse-footnote-def [line]
   (when-let [[_ label content] (re-matches footnote-def-pattern line)]
     {:label label :content content}))
 
-(defn parse-link [s]
+(defn- parse-link [s]
   (cond
     ;; Internal link to heading: [[*Some Heading]]
     (str/starts-with? s "*")
@@ -445,7 +438,7 @@
       {:type (keyword t) :target target}
       {:type :external :target s})))
 
-(defn parse-attr-string
+(defn- parse-attr-string
   "Parse an Org attribute string like ':width 300 :alt \"An image\" :class my-class'
    into a map {:width \"300\" :alt \"An image\" :class \"my-class\"}"
   [s]
@@ -464,7 +457,7 @@
             (recur rest result)
             result))))))
 
-(defn parse-affiliated-keywords
+(defn- parse-affiliated-keywords
   "Collect consecutive affiliated keyword lines (#+attr_html, #+caption, etc.)
    Returns [affiliated-map remaining-lines] where affiliated-map has:
    {:caption \"...\" :name \"...\" :attr {:html {...} :org {...}}}"
@@ -495,7 +488,7 @@
           :else
           (recur more (assoc result (keyword kw-lower) (str/trim value))))))))
 
-(defn has-affiliated-keywords?
+(defn- has-affiliated-keywords?
   "Check if the affiliated map contains any actual content."
   [affiliated]
   (some (fn [[k v]]
@@ -505,7 +498,7 @@
             :else (seq v)))
         affiliated))
 
-(defn attach-affiliated
+(defn- attach-affiliated
   "Attach affiliated keywords to a node if present."
   [node affiliated]
   (if (has-affiliated-keywords? affiliated)
@@ -525,7 +518,7 @@
 ;; For code/verbatim (=, ~):
 ;; - Same boundary rules, but inner content allows any non-whitespace
 ;;   since these are literal/verbatim spans
-(def format-patterns
+(def ^:private format-patterns
   {:bold      #"(?<=^|[\s\p{Punct}])\*(\w[^\*]*?\w|\w)\*(?=$|[\s\p{Punct}])"
    :italic    #"(?<=^|[\s\p{Punct}])/(\w[^/]*?\w|\w)/(?=$|[\s\p{Punct}])"
    :underline #"(?<=^|[\s\p{Punct}])_(\w[^_]*?\w|\w)_(?=$|[\s\p{Punct}])"
@@ -533,14 +526,12 @@
    :code      #"(?<=^|[\s\p{Punct}])~([^~\s](?:[^~]*[^~\s])?)~(?=$|[\s\p{Punct}])"
    :verbatim  #"(?<=^|[\s\p{Punct}])=([^=\s](?:[^=]*[^=\s])?)=(?=$|[\s\p{Punct}])"})
 
-(defn escape-html [text]
-  (if (some? text)
-    (-> text
-        (str/replace "&" "&amp;")
-        (str/replace "<" "&lt;")
-        (str/replace ">" "&gt;")
-        (str/replace "\"" "&quot;"))
-    ""))
+(defn- escape-html [text]
+  (-> (str text)
+      (str/replace "&" "&amp;")
+      (str/replace "<" "&lt;")
+      (str/replace ">" "&gt;")
+      (str/replace "\"" "&quot;")))
 
 (defn- upper-name [k] (str/upper-case (name k)))
 
@@ -556,9 +547,7 @@
        (map #(str prefix %))
        (str/join "\n")))
 
-(def image-extensions #{"png" "jpg" "jpeg" "gif" "svg" "webp" "bmp" "ico" "tiff" "tif"})
-
-(def image-mime-types
+(def ^:private image-mime-types
   {"png"  "image/png"
    "jpg"  "image/jpeg"
    "jpeg" "image/jpeg"
@@ -570,33 +559,35 @@
    "tiff" "image/tiff"
    "tif"  "image/tiff"})
 
-(defn get-file-extension
+(def ^:private image-extensions (set (keys image-mime-types)))
+
+(defn- get-file-extension
   "Extract lowercase file extension from a path or URL."
   [path]
   (when path
     (let [clean-path (first (str/split (str/lower-case path) #"[?#]"))]
       (last (str/split clean-path #"\.")))))
 
-(defn image-url?
+(defn- image-url?
   "Check if a URL points to an image based on file extension."
   [url]
   (when url
     (contains? image-extensions (get-file-extension url))))
 
-(defn remote-url?
+(defn- remote-url?
   "Check if URL is a remote HTTP/HTTPS URL."
   [url]
   (when url
     (boolean (re-find #"^https?://" url))))
 
-(defn expand-home
+(defn- expand-home
   "Expand ~ to user home directory in file paths."
   [path]
   (if (and path (str/starts-with? path "~/"))
     (str (System/getProperty "user.home") (subs path 1))
     path))
 
-(defn file-to-base64
+(defn- file-to-base64
   "Read a file and return its base64-encoded content, or nil if file doesn't exist."
   [filepath]
   (try
@@ -607,7 +598,7 @@
           (.encodeToString encoder bytes))))
     (catch Exception _ nil)))
 
-(defn image-to-data-uri
+(defn- image-to-data-uri
   "Convert a local image file to a data URI, or nil if not possible."
   [filepath]
   (some-> (get-file-extension filepath)
@@ -615,7 +606,7 @@
           (as-> mime (when-let [b64 (file-to-base64 filepath)]
                        (str "data:" mime ";base64," b64)))))
 
-(defn build-img-attrs
+(defn- build-img-attrs
   "Build HTML attribute string from a map of attributes.
    Handles :alt, :title, :width, :height, :class, :id, :style, etc."
   [attrs]
@@ -626,7 +617,7 @@
                   (str " " (name k) "=\"" (escape-html (str v)) "\""))))
          (str/join))))
 
-(defn render-image-html
+(defn- render-image-html
   "Render an image tag with optional affiliated attributes.
    src: the image URL or data URI
    default-alt: fallback alt text if not specified in attrs
@@ -645,7 +636,7 @@
       (str "<figure>" img-tag "<figcaption>" (escape-html caption) "</figcaption></figure>")
       img-tag)))
 
-(defn heading-to-slug
+(defn- heading-to-slug
   "Convert a heading title to a URL-safe slug for anchor links."
   [title]
   (-> title
@@ -684,7 +675,7 @@
              :custom-id target
              url)))
 
-(defn format-link
+(defn- format-link
   "Format an org link to the specified format.
    Optionally accepts affiliated keywords for enhanced image rendering."
   ([fmt match] (format-link fmt match nil))
@@ -754,11 +745,11 @@
              display (resolve-display link-type target url desc)]
          (str "[" display "](" href ")"))))))
 
-(defn apply-format-patterns [text replacements]
+(defn- apply-format-patterns [text replacements]
   (reduce (fn [t [k repl]] (str/replace t (format-patterns k) repl))
           text replacements))
 
-(defn format-text-markdown [text]
+(defn- format-text-markdown [text]
   (if (non-blank? text)
     (let [;; First, protect existing markdown links and code
           [protected restore] (protect-patterns text [[#"\[[^\]]+\]\([^)]+\)" "MD-LINK-"]
@@ -785,7 +776,7 @@
       (restore (link-restore (code-restore formatted))))
     ""))
 
-(defn format-footnote-html
+(defn- format-footnote-html
   "Format a footnote reference or inline footnote to HTML.
    For [fn:label] -> link to footnote definition with id for back-link
    For [fn:label:content] or [fn::content] -> inline with tooltip"
@@ -801,7 +792,7 @@
         (str "<sup id=\"fnref-" label "\"><a href=\"#fn-" label "\" class=\"footnote-ref\">" label "</a></sup>")
         full))))
 
-(defn format-text-html [text]
+(defn- format-text-html [text]
   (if (non-blank? text)
     (let [;; First protect macros and org links before escaping HTML
           ;; Macro pattern must come first: {{{name(args)}}} where args can contain anything
@@ -835,21 +826,18 @@
       (restore (code-restore formatted)))
     ""))
 
-(defn extract-single-image-link
+(defn- extract-single-image-link
   "If text contains exactly one org link and it's an image, return [url desc].
    Otherwise return nil."
   [text]
-  (let [trimmed (str/trim text)
-        ;; Check if the entire content is a single link (with optional whitespace)
-        with-desc-match (re-matches #"^\[\[([^\]]+)\](?:\[([^\]]+)\])?\]$" trimmed)
-        without-desc-match (re-matches #"^\[\[([^\]]+)\]\]$" trimmed)]
-    (when-let [[_ url desc] (or with-desc-match without-desc-match)]
+  (let [trimmed (str/trim text)]
+    (when-let [[_ url desc] (re-matches #"^\[\[([^\]]+)\](?:\[([^\]]+)\])?\]$" trimmed)]
       (let [parsed (parse-link url)
             actual-url (if (#{:http :https} (:type parsed)) url (:target parsed))]
         (when (image-url? actual-url)
           [url desc])))))
 
-(defn format-paragraph-html
+(defn- format-paragraph-html
   "Format a paragraph for HTML, with special handling for image-only paragraphs
    that have affiliated keywords."
   [content affiliated]
@@ -860,7 +848,7 @@
     ;; Regular paragraph
     (str "<p>" (format-text-html content) "</p>")))
 
-(defn format-text
+(defn- format-text
   "Format text according to output format. For :org, returns text unchanged."
   [fmt text]
   (case fmt
@@ -868,14 +856,14 @@
     :md (format-text-markdown text)
     text))
 
-(defn flush-item [items current-item]
+(defn- flush-item [items current-item]
   (if current-item (conj items current-item) items))
 
-(defn ordered-marker? [marker]
+(defn- ordered-marker? [marker]
   (boolean (re-matches #"\d+[.)]" marker)))
 
 ;; Parsing Functions
-(defn parse-headline [line]
+(defn- parse-headline [line]
   (if-let [[_ stars todo priority title tags] (re-matches headline-full-pattern line)]
     {:level (count stars)
      :title (str/trim title)
@@ -887,10 +875,10 @@
       {:level (count stars) :title (str/trim title)})))
 
 ;; Keyword set for metadata parsing (document preamble).
-(def metadata-rendering-keywords
+(def ^:private preamble-metadata-keywords
   #{"title" "author" "date" "subtitle" "email" "language" "description" "keywords" "options"})
 
-(defn parse-metadata [indexed-lines]
+(defn- parse-metadata [indexed-lines]
   (loop [[{:keys [line] :as l} & more :as remaining] indexed-lines
          meta {} order [] raw []]
     (if (nil? l)
@@ -899,7 +887,7 @@
         (let [kw       (keyword (str/lower-case key))
               kw-str   (str/lower-case key)]
           ;; Only keep metadata that affects rendering
-          (if (contains? metadata-rendering-keywords kw-str)
+          (if (contains? preamble-metadata-keywords kw-str)
             (let [existing (get meta kw)
                   v        (str/trim value)
                   new-val  (cond
@@ -916,7 +904,7 @@
           (recur more meta order raw)
           [(assoc meta :_order order :_raw raw) remaining])))))
 
-(defn parse-property-drawer [indexed-lines]
+(defn- parse-property-drawer [indexed-lines]
   (if (and (seq indexed-lines)
            (re-matches property-drawer-start-pattern (:line (first indexed-lines))))
     (let [start-line-num (:num (first indexed-lines))]
@@ -936,7 +924,7 @@
             (recur more properties)))))
     [nil {} indexed-lines]))
 
-(defn parse-description-item
+(defn- parse-description-item
   "Check if content matches a description list item (term :: definition).
    Returns {:term term :definition definition} or nil."
   [content]
@@ -944,9 +932,9 @@
     {:term (str/trim term) :definition (if definition (str/trim definition) "")}))
 
 ;; Forward declaration - parse-content is defined later but needed by parse-list-items
-(declare parse-content)
+(declare ^:private parse-content)
 
-(defn normalize-marker
+(defn- normalize-marker
   "Normalize list markers for comparison.
    Ordered markers all normalize to :ordered.
    Unordered markers stay as-is (-, +, *)."
@@ -955,7 +943,7 @@
     :ordered
     marker))
 
-(defn collect-list-item-body
+(defn- collect-list-item-body
   "Collect continuation lines for a list item until we hit another list item,
    a headline, or a non-indented line (outside of blocks). Returns [indexed-lines remaining]."
   [indexed-lines min-indent]
@@ -1027,7 +1015,7 @@
   (when-let [[_ indent marker content] (re-matches list-item-pattern line)]
     [indent marker content]))
 
-(defn parse-list-items [indexed-lines initial-indent initial-marker]
+(defn- parse-list-items [indexed-lines initial-indent initial-marker]
   (let [normalized-initial (normalize-marker initial-marker)]
     (loop [[{:keys [line num]} & more :as remaining] indexed-lines
            items [] current-item nil after-blank false]
@@ -1110,7 +1098,7 @@
             :else
             [(flush-item items current-item) remaining]))))))
 
-(defn process-list [indexed-lines]
+(defn- process-list [indexed-lines]
   (let [{:keys [line num]} (first indexed-lines)]
     (if-let [[_ indent marker _] (re-matches list-item-pattern line)]
       (let [initial-indent     (count indent)
@@ -1120,7 +1108,7 @@
         [(make-node :list :items items :ordered ordered :description is-description :line num) rest-lines])
       [nil indexed-lines])))
 
-(defn parse-table [indexed-lines]
+(defn- parse-table [indexed-lines]
   (let [start-line-num (:num (first indexed-lines))]
     (loop [[{:keys [line]} & more :as remaining] indexed-lines
            rows [] has-separator false]
@@ -1143,7 +1131,7 @@
         :else
         [(make-node :table :rows rows :has-header has-separator :line start-line-num) remaining]))))
 
-(defn parse-block [indexed-lines]
+(defn- parse-block [indexed-lines]
   (let [{:keys [line num]} (first indexed-lines)]
     (if-let [[_ block-type args] (re-matches generic-block-begin-pattern line)]
       (let [block-type-lower (str/lower-case block-type)
@@ -1178,7 +1166,7 @@
             (recur more (conj content line)))))
       [nil indexed-lines])))
 
-(defn parse-consecutive-lines [indexed-lines pred extract-fn node-type]
+(defn- parse-consecutive-lines [indexed-lines pred extract-fn node-type]
   (let [start-line-num (:num (first indexed-lines))]
     (loop [[{:keys [line]} & more :as remaining] indexed-lines
            content []]
@@ -1188,27 +1176,27 @@
                       :line start-line-num) remaining])
         (recur more (conj content (extract-fn line)))))))
 
-(defn parse-comment [indexed-lines]
+(defn- parse-comment [indexed-lines]
   (parse-consecutive-lines
    indexed-lines comment-line?
    #(str/replace % #"^\s*#\s?" "") :comment))
 
-(defn parse-fixed-width [indexed-lines]
+(defn- parse-fixed-width [indexed-lines]
   (parse-consecutive-lines
    indexed-lines fixed-width-line?
    #(second (re-matches fixed-width-pattern %)) :fixed-width))
 
-(defn parse-html-lines [indexed-lines]
+(defn- parse-html-lines [indexed-lines]
   (parse-consecutive-lines
    indexed-lines html-line?
    #(second (re-matches html-line-pattern %)) :html-line))
 
-(defn parse-latex-lines [indexed-lines]
+(defn- parse-latex-lines [indexed-lines]
   (parse-consecutive-lines
    indexed-lines latex-line?
    #(second (re-matches latex-line-pattern %)) :latex-line))
 
-(defn parse-footnote-definition [indexed-lines]
+(defn- parse-footnote-definition [indexed-lines]
   (let [[{:keys [line num]} & more] indexed-lines]
     (when-let [{:keys [label content]} (parse-footnote-def line)]
       (loop [[{:keys [line]} & more2 :as remaining] more
@@ -1220,7 +1208,7 @@
            remaining]
           (recur more2 (conj full-content (str/trim line))))))))
 
-(defn parse-paragraph [indexed-lines]
+(defn- parse-paragraph [indexed-lines]
   (let [start-line-num (:num (first indexed-lines))]
     (loop [[{:keys [line]} & more :as remaining] indexed-lines
            content []]
@@ -1258,6 +1246,14 @@
   (when-let [[node rest-lines] (parser remaining)]
     [rest-lines (conj nodes (attach-affiliated node affiliated))]))
 
+(defn- try-parse-maybe-affiliated
+  "Try a parser, optionally attaching affiliated keywords to the result."
+  [parser remaining nodes affiliated]
+  (or (if affiliated
+        (try-parse-with-affiliated parser remaining nodes affiliated)
+        (try-parse parser remaining nodes))
+      [(rest remaining) nodes]))
+
 (def ^:private simple-line-parsers
   [[comment-line?     parse-comment]
    [fixed-width-line? parse-fixed-width]
@@ -1265,7 +1261,7 @@
    [latex-line?       parse-latex-lines]
    [footnote-def?     parse-footnote-definition]])
 
-(defn parse-content [indexed-lines]
+(defn- parse-content [indexed-lines]
   (loop [[{:keys [line]} & more :as remaining] indexed-lines
          nodes []
          pending-affiliated nil
@@ -1301,24 +1297,15 @@
           (recur rest-lines nodes' nil 0))
 
         (list-item? line)
-        (let [[rest-lines nodes'] (or (if pending-affiliated
-                                        (try-parse-with-affiliated process-list remaining nodes pending-affiliated)
-                                        (try-parse process-list remaining nodes))
-                                      [more nodes])]
+        (let [[rest-lines nodes'] (try-parse-maybe-affiliated process-list remaining nodes pending-affiliated)]
           (recur rest-lines nodes' nil 0))
 
         (table-line? line)
-        (let [[rest-lines nodes'] (or (if pending-affiliated
-                                        (try-parse-with-affiliated parse-table remaining nodes pending-affiliated)
-                                        (try-parse parse-table remaining nodes))
-                                      [more nodes])]
+        (let [[rest-lines nodes'] (try-parse-maybe-affiliated parse-table remaining nodes pending-affiliated)]
           (recur rest-lines nodes' nil 0))
 
         (re-matches generic-block-begin-pattern line)
-        (let [[rest-lines nodes'] (or (if pending-affiliated
-                                        (try-parse-with-affiliated parse-block remaining nodes pending-affiliated)
-                                        (try-parse parse-block remaining nodes))
-                                      [more nodes])]
+        (let [[rest-lines nodes'] (try-parse-maybe-affiliated parse-block remaining nodes pending-affiliated)]
           (recur rest-lines nodes' nil 0))
 
         :else
@@ -1326,18 +1313,16 @@
           (recur rest-lines (conj nodes (attach-affiliated paragraph pending-affiliated)) nil 0)
           (recur more nodes nil 0))))))
 
-(defn update-path-stack [path-stack new-level title]
+(defn- update-path-stack [path-stack new-level title]
   (let [current-level (count path-stack)]
     (cond
       (> new-level current-level) (conj path-stack title)
       (= new-level current-level) (conj (vec (butlast path-stack)) title)
       :else (conj (vec (take (dec new-level) path-stack)) title))))
 
-(defn parse-sections
+(defn- parse-sections
   ([indexed-lines current-path]
    (parse-sections indexed-lines current-path nil 0))
-  ([indexed-lines current-path parent-level]
-   (parse-sections indexed-lines current-path parent-level 0))
   ([indexed-lines current-path parent-level initial-blanks-before]
    (loop [[{:keys [line num]} & more :as remaining] indexed-lines
           sections [] path-stack current-path
@@ -1412,9 +1397,9 @@
          doc)))))
 
 ;; AST Filtering
-(defn section? [node] (= (:type node) :section))
+(defn- section? [node] (= (:type node) :section))
 
-(defn section-matches? [section {:keys [max-level title-pattern id-pattern]}]
+(defn- section-matches? [section {:keys [max-level title-pattern id-pattern]}]
   (let [level (:level section)]
     (and (or (nil? max-level) (<= level max-level))
          (or (nil? title-pattern) (when-let [title (:title section)] (re-find title-pattern title)))
@@ -1422,7 +1407,7 @@
              (when-let [id (get-in section [:properties :id])] (re-find id-pattern id))
              (when-let [custom-id (get-in section [:properties :custom_id])] (re-find id-pattern custom-id))))))
 
-(defn filter-ast-node
+(defn- filter-ast-node
   ([node opts] (filter-ast-node node opts []))
   ([node opts ancestors]
    (case (:type node)
@@ -1446,9 +1431,9 @@
          :else nil))
      node)))
 
-(declare flatten-deep-sections-expand)
+(declare ^:private flatten-deep-sections-expand)
 
-(defn flatten-deep-sections
+(defn- flatten-deep-sections
   "Transform sections deeper than max-level-all: convert their headings to bold
    paragraphs and inline their children into the parent's child list."
   [node max-level-all]
@@ -1461,7 +1446,7 @@
                  node)
       node)))
 
-(defn flatten-deep-sections-expand
+(defn- flatten-deep-sections-expand
   "For a single child node: if it's a section beyond max-level-all, return
    a bold paragraph for its title followed by its children (recursively flattened).
    Otherwise return the node unchanged (wrapped in a vector)."
@@ -1478,13 +1463,13 @@
       (into [title-para] children))
     [(flatten-deep-sections node max-level-all)]))
 
-(defn filter-ast [ast opts]
+(defn- filter-ast [ast opts]
   (let [filter-needed (some (comp some? val) (dissoc opts :max-level-all))
         filtered (if filter-needed (filter-ast-node ast opts) ast)]
     (flatten-deep-sections filtered (:max-level-all opts))))
 
 ;; AST Content Rendering
-(defn render-content-in-node [node render-format]
+(defn- render-content-in-node [node render-format]
   (let [fmt #(format-text render-format %)
         render-children #(mapv (fn [c] (render-content-in-node c render-format)) %)
         result (case (:type node)
@@ -1504,30 +1489,28 @@
                  node)]
     (remove-empty-vals result)))
 
-(defn render-ast-content [ast render-format] (render-content-in-node ast render-format))
-
 ;; Content Cleaning
-(defn clean-properties [properties]
+(defn- clean-properties [properties]
   (when (seq properties)
     (seq (into {} (remove (fn [[_ v]] (or (nil? v) (str/blank? (str v)))) properties)))))
 
-(defn content-blank? [node]
+(defn- content-blank? [node]
   (case (:type node)
     (:paragraph :comment :fixed-width :quote-block :src-block :block :footnote-def :html-line :latex-line) (str/blank? (:content node))
     :list (empty? (:items node))
     :table (empty? (:rows node))
     false))
 
-(declare clean-node)
-(defn clean-children [children remove-blanks?]
+(declare ^:private clean-node)
+(defn- clean-children [children remove-blanks?]
   (let [cleaned (mapv clean-node children)]
     (if remove-blanks? (vec (remove content-blank? cleaned)) cleaned)))
 
-(defn clean-node [node]
+(defn- clean-node [node]
   (let [cleaned
         (case (:type node)
           :document (-> node (update :title #(when % (str/trim %))) (update :children #(clean-children % true)))
-          :section (-> node (update :title str/trim) (update :properties clean-properties) (update :children #(clean-children % true)))
+          :section (-> node (update :title #(when % (str/trim %))) (update :properties clean-properties) (update :children #(clean-children % true)))
           :list-item (let [node (update node :children #(clean-children % false))]
                        (if (:term node)
                          (cond-> node
@@ -1541,10 +1524,8 @@
           node)]
     (remove-empty-vals (dissoc cleaned :line))))
 
-(defn clean-ast [ast] (clean-node ast))
-
 ;; Unified Renderer
-(def html-styles
+(def ^:private html-styles
   "body { font-family: sans-serif; line-height: 1.6; margin: 2em auto; max-width: 800px; padding: 0 1em; }
 h1, h2, h3, h4, h5, h6 { line-height: 1.2; }
 pre { background-color: #f8f8f8; border: 1px solid #ddd; border-radius: 4px; padding: 1em; overflow-x: auto; }
@@ -1573,9 +1554,9 @@ li > p { margin-top: 0.5em; }
 .planning { color: #666; font-size: 0.9em; margin: 0.2em 0 0.5em 0; }
 .planning-keyword { font-weight: bold; }")
 
-(def hljs-cdn "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0")
+(def ^:private hljs-cdn "https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0")
 
-(defn html-template [title content]
+(defn- html-template [title content]
   (let [has-code (str/includes? content "<code")]
     (str "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n"
          "  <meta charset=\"UTF-8\">\n"
@@ -1590,7 +1571,7 @@ li > p { margin-top: 0.5em; }
                 "\n<script>hljs.highlightAll();</script>"))
          "\n</body>\n</html>")))
 
-(defn render-table [rows has-header fmt]
+(defn- render-table [rows has-header fmt]
   (if (empty? rows) ""
       (let [format-cell #(format-text fmt %)
             formatted-rows (mapv (fn [row] (mapv format-cell row)) rows)
@@ -1620,9 +1601,9 @@ li > p { margin-top: 0.5em; }
                  (str/join "\n" (map format-row (rest padded-rows))))
             (str/join "\n" (map format-row padded-rows)))))))
 
-(declare render-node)
+(declare ^:private render-node)
 
-(defn render-properties-org
+(defn- render-properties-org
   "Render properties as org :PROPERTIES: drawer."
   [properties]
   (when (seq properties)
@@ -1630,7 +1611,7 @@ li > p { margin-top: 0.5em; }
          (str/join "\n" (map (fn [[k v]] (str ":" (upper-name k) ": " v)) properties))
          "\n:END:")))
 
-(defn render-list-item [item index ordered level fmt]
+(defn- render-list-item [item index ordered level fmt]
   (let [indent (repeat-str (* level list-indent-width) " ")
         marker (if ordered (str (inc index) ". ") "- ")
         children-str (when (seq (:children item))
@@ -1665,7 +1646,7 @@ li > p { margin-top: 0.5em; }
                  ""))))
 
 ;; #+OPTIONS parsing
-(defn parse-options-string
+(defn- parse-options-string
   "Parse an #+OPTIONS: value string like 'toc:t H:2 num:t' into a map.
    Values 't' become true, 'nil' become false, integers are parsed,
    other values remain as strings."
@@ -1679,7 +1660,7 @@ li > p { margin-top: 0.5em; }
                "nil" false
                (try (Integer/parseInt v) (catch Exception _ v)))]))))
 
-(defn get-export-options
+(defn- get-export-options
   "Extract parsed export options from the AST metadata."
   [ast]
   (parse-options-string (get-in ast [:meta :options])))
@@ -2059,7 +2040,7 @@ li > p { margin-top: 0.5em; }
     :org (prefix-lines "#+latex: " (:content node))
     ""))
 
-(defn render-node
+(defn- render-node
   ([node fmt] (render-node node fmt 0))
   ([node fmt level]
    (case (:type node)
@@ -2084,7 +2065,7 @@ li > p { margin-top: 0.5em; }
        ""))))
 
 ;; Section numbering
-(defn number-sections
+(defn- number-sections
   "Walk the AST and annotate each :section node with a :section-number string
    (e.g. '1', '1.1', '2.3.1') based on its level and position among siblings.
    Only applied when the document has num:t in #+OPTIONS (default: false)."
@@ -2102,11 +2083,8 @@ li > p { margin-top: 0.5em; }
                     (if (= (:type child) :section)
                       (let [level (:level child)
                             ;; Increment counter at this level, reset deeper levels
-                            updated (-> counters
-                                        (update level (fnil inc 0))
-                                        (#(reduce (fn [m k] (dissoc m k))
-                                                  %
-                                                  (filter (fn [k] (> k level)) (keys %)))))
+                            incremented (update counters level (fnil inc 0))
+                            updated (apply dissoc incremented (filter #(> % level) (keys incremented)))
                             ;; Build section number string from level 1 to current level
                             sec-num (str/join "." (map #(get updated % 1)
                                                        (range 1 (inc level))))
@@ -2168,32 +2146,20 @@ li > p { margin-top: 0.5em; }
 (defn- collect-ics-items
   "Walk the AST and collect sections that have :scheduled or :deadline planning."
   [node]
-  (let [items (atom [])]
-    (letfn [(walk [n path]
-              (let [is-section (= (:type n) :section)
-                    new-path (if is-section (conj path (:title n)) path)]
-                (when is-section
-                  (let [planning (:planning n)
-                        title (:title n)
-                        todo (:todo n)]
-                    (when (:scheduled planning)
-                      (swap! items conj {:ics-type :vevent
-                                         :title title
-                                         :path new-path
-                                         :todo todo
-                                         :timestamp (:scheduled planning)
-                                         :repeater (:scheduled-repeat planning)}))
-                    (when (and (:deadline planning) todo)
-                      (swap! items conj {:ics-type :vtodo
-                                         :title title
-                                         :path new-path
-                                         :todo todo
-                                         :timestamp (:deadline planning)
-                                         :repeater (:deadline-repeat planning)}))))
-                (doseq [child (:children n)]
-                  (walk child new-path))))]
-      (walk node [])
-      @items)))
+  (letfn [(walk [n path]
+            (let [is-section (= (:type n) :section)
+                  new-path (if is-section (conj path (:title n)) path)
+                  self (when is-section
+                         (let [{:keys [planning title todo]} n]
+                           (cond-> []
+                             (:scheduled planning)
+                             (conj {:ics-type :vevent :title title :path new-path :todo todo
+                                    :timestamp (:scheduled planning) :repeater (:scheduled-repeat planning)})
+                             (and (:deadline planning) todo)
+                             (conj {:ics-type :vtodo :title title :path new-path :todo todo
+                                    :timestamp (:deadline planning) :repeater (:deadline-repeat planning)}))))]
+              (into (vec self) (mapcat #(walk % new-path) (:children n)))))]
+    (walk node [])))
 
 (defn- uid-for-item
   "Generate a deterministic UID from item properties."
@@ -2223,7 +2189,7 @@ li > p { margin-top: 0.5em; }
                    "y" "YEARLY")]
         (str "RRULE:FREQ=" freq ";INTERVAL=" interval)))))
 
-(defn render-ast-as-ics
+(defn- render-ast-as-ics
   "Export scheduled items as VEVENT and deadline+TODO items as VTODO."
   [ast]
   (let [items (collect-ics-items ast)
@@ -2294,12 +2260,12 @@ li > p { margin-top: 0.5em; }
   (yaml/generate-string ast {:dumper-options {:flow-style :block}}))
 
 ;; Statistics
-(defn count-words
+(defn- count-words
   "Count words in a string."
   [s]
   (if (non-blank? s) (count (re-seq #"\S+" s)) 0))
 
-(defn count-images
+(defn- count-images
   "Count image links in a string.
    Matches [[path/to/image.png]] or [[path/to/image.png][description]]"
   [s]
@@ -2325,7 +2291,7 @@ li > p { margin-top: 0.5em; }
   [m k n]
   (update m k (fnil + 0) n))
 
-(defn collect-stats
+(defn- collect-stats
   "Recursively collect statistics from AST nodes."
   [node]
   (let [node-type (:type node)
@@ -2419,12 +2385,12 @@ li > p { margin-top: 0.5em; }
     (->> stats
          (map (fn [[k v]]
                 (let [label (get stats-label-map k (name k))
-                      padding (apply str (repeat (- max-label-len (count label)) " "))]
+                      padding (repeat-str (- max-label-len (count label)) " ")]
                   (str label ": " padding v))))
          (str/join "\n"))))
 
 ;; CLI Options
-(def cli-options
+(def ^:private cli-options
   [["-h" "--help" "Show help"]
    ["-f" "--format FORMAT" "Output format: json, edn, yaml, md, html, org, or ics"
     :default "json" :validate [#{"json" "edn" "yaml" "md" "html" "org" "ics"} "Must be: json, edn, yaml, md, html, org, ics"]]
@@ -2442,7 +2408,7 @@ li > p { margin-top: 0.5em; }
     :parse-fn #(Integer/parseInt %) :validate [pos? "Must be positive"]]
    ["-b" "--base-url URL" "Base URL prepended to relative links (include trailing slash)"]])
 
-(defn usage [summary]
+(defn- usage [summary]
   (str/join \newline
             ["Org AST Parser - Parse Org files into AST"
              "" "Usage: org-parse [options] <org-file>"
@@ -2496,7 +2462,7 @@ li > p { margin-top: 0.5em; }
                   output-format (:format options)
                   render-format (keyword (:render options))
                   is-org-output (= output-format "org")
-                  cleaned-ast (if is-org-output filtered-ast (clean-ast filtered-ast))]
+                  cleaned-ast (if is-org-output filtered-ast (clean-node filtered-ast))]
               ;; Report parse errors to stderr if any
               (when-let [errs (:parse-errors cleaned-ast)]
                 (binding [*out* *err*]
@@ -2521,7 +2487,7 @@ li > p { margin-top: 0.5em; }
                     (flush))
 
                 :else
-                (let [rendered-ast (render-ast-content cleaned-ast render-format)]
+                (let [rendered-ast (render-content-in-node cleaned-ast render-format)]
                   (case output-format
                     "json" (println (format-ast-as-json rendered-ast))
                     "edn" (println (format-ast-as-edn rendered-ast))
