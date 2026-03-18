@@ -1,2 +1,11 @@
-{:paths ["src/bzg"]
- :bbin/bin {org-parse {:main-opts ["-m" "bzg.org-parse"]}}}
+{:paths ["src" "test"]
+ :bbin/bin {org-parse {:main-opts ["-m" "bzg.org-parse"]}}
+
+ :tasks
+ {test:generate {:doc  "Generate expected test outputs"
+                 :task (do (require 'bzg.org-parse-test)
+                           ((resolve 'bzg.org-parse-test/generate)))}
+
+  test          {:doc  "Run tests against expected outputs"
+                 :task (do (require 'bzg.org-parse-test)
+                           ((resolve 'bzg.org-parse-test/test-all)))}}}
