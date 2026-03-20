@@ -1122,7 +1122,7 @@
           [(make-node :table :rows rows :has-header false :line start-line-num) remaining])
 
         (re-matches table-pattern line)
-        (let [row (->> (str/split (str/trim line) #"\|")
+        (let [row (->> (str/split (str/trim line) #"\|" -1)
                        rest        ; drop leading empty from split
                        butlast     ; drop trailing empty from split
                        (mapv str/trim))]
@@ -1528,6 +1528,9 @@
 (def ^:private html-styles
   "body { font-family: sans-serif; line-height: 1.6; margin: 2em auto; max-width: 800px; padding: 0 1em; }
 h1, h2, h3, h4, h5, h6 { line-height: 1.2; }
+header { margin-bottom: 1.5em; }
+header .document-title { margin-bottom: 0.2em; padding-bottom: 0.2em; border-bottom: 3px solid; border-color: #ccc; }
+.subtitle { color: #555; font-size: 1.2em; margin-top: 0; }
 pre { background-color: #f8f8f8; border: 1px solid #ddd; border-radius: 4px; padding: 1em; overflow-x: auto; }
 code { font-family: monospace; }
 img { max-width: 100%; }
@@ -1743,7 +1746,11 @@ li > p { margin-top: 0.5em; }
         toc-str (when toc? (render-toc toc-entries fmt))]
     (case fmt
       :html (let [footnotes (filter #(= (:type %) :footnote-def) (:children node))
-                  title-html (when-let [t (:title node)] (str "<h1>" (format-text-html t) "</h1>\n"))
+                  title-html (when-let [t (:title node)]
+                               (str "<header>\n<h1 class=\"document-title\">" (format-text-html t) "</h1>\n"
+                                    (when-let [st (get-in node [:meta :subtitle])]
+                                      (str "<p class=\"subtitle\">" (format-text-html st) "</p>\n"))
+                                    "</header>\n"))
                   toc-html (when toc-str (str toc-str "\n"))
                   main-content (str title-html toc-html
                                     (->> (:children node)
