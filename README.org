@@ -6,49 +6,57 @@ Take an Org file and output it as data in json/yaml/edn format, or export it to 
 
 Parse as AST in JSON:
 
-:   org-parse notes.org                       # Output JSON with content rendered as Markdown
+: org-parse notes.org                       # Output JSON with content rendered as Markdown
 
 Parse and display stats:
 
-:   org-parse -s notes.org                    # Display some stats on notes.org
+: org-parse -s notes.org                    # Display some stats on notes.org
 
 By default the content of the AST node is exported as Markdown, you
 can ask for HTML or Org instead:
 
-:   org-parse -r html notes.org               # Output AST (as json) and render contents as HTML
-:   org-parse -r org notes.org                # Output AST (as json) and render contents as Org
+: org-parse -r html notes.org               # Output AST (as json) and render contents as HTML
+: org-parse -r org notes.org                # Output AST (as json) and render contents as Org
 
 Instead of exporting the AST, you can export the entire file to
 Markdown, HTML or Org:
 
-:   org-parse -f md notes.org                 # Output AST in Markdown format
-:   org-parse -f edn notes.org                # Output AST in EDN format
-:   org-parse -f yaml notes.org               # Output AST in YAML format
-:   org-parse -f html notes.org               # Output AST in HTML format
-:   org-parse -f org notes.org                # Export as Org (unwrapped)
+: org-parse -f md notes.org                 # Output AST in Markdown format
+: org-parse -f edn notes.org                # Output AST in EDN format
+: org-parse -f yaml notes.org               # Output AST in YAML format
+: org-parse -f html notes.org               # Output AST in HTML format
+: org-parse -f org notes.org                # Export as Org (unwrapped)
 
 By default, the contents are unwrapped, you can prevent this:
 
-:   org-parse -n notes.org                    # Preserve original line breaks (no unwrap)
+: org-parse -n notes.org                    # Preserve original line breaks (no unwrap)
 
 If you don't need the full AST, you can apply some filtering:
 
-:   org-parse -m 2 notes.org                  # Filter: headlines with level <= 2
-:   org-parse -M 2 notes.org                  # Filter: headlines with level >= 2
-:   org-parse -m 3 -M 2 notes.org             # Filter: headlines with 2 <= level <= 3
-:   org-parse -t "TODO" notes.org             # Filter: title matches regex
-:   org-parse -T "Projects" notes.org         # Filter: ancestor title matches regex
-:   org-parse -i "section[0-9]+" notes.org    # Filter: ID or CUSTOM_ID matches regex
-:   org-parse -I "chapter\d+" notes.org       # Filter: ancestor ID or CUSTOM_ID matches regex
-:   org-parse -m 2 -i "^ch" notes.org         # Combine filters (all must match)
+: org-parse -l 2 notes.org                  # Filter: headlines with level <= 2
+: org-parse -L 2 notes.org                  # Filter: headlines with level <= 2 with deeper headings rendered as bold
+: org-parse -t "TODO" notes.org             # Filter: title matches regex
+: org-parse -T "Projects" notes.org         # Filter: ancestor title matches regex
+: org-parse -i "section[0-9]+" notes.org    # Filter: ID or CUSTOM_ID matches regex
+: org-parse -I "chapter\d+" notes.org       # Filter: ancestor ID or CUSTOM_ID matches regex
+: org-parse -l 2 -i "^ch" notes.org         # Combine filters (all must match)
 
 If you need to prepend a base URL to relative links:
 
-:   org-parse -b https://base.io -f html index.org # Add base-URL to relative links
+: org-parse -b https://base.io -f html index.org # Add base-URL to relative links
+
+If you want to use a CSS theme for HTML output:
+
+: org-parse -c org -f html notes.org            # Use the "org" CSS Pico 2 theme
+: org-parse -c custom.css -f html notes.org     # Use the local custom.css file
+: org-parse -c https://my.com/custom.css -f html notes.org     # Use the distant css file
+
+Themes are loaded from [[https://cdn.jsdelivr.net/gh/bzg/pico-themes@main/][pico-themes]] which proposes =org=, =dsfr=, =swh=,
+=doric=, =lincoln= and =teletype=.
 
 Display stats:
 
-:   org-parse -s notes.org                    # Display basic stats about notes.org
+: org-parse -s notes.org                    # Display basic stats about notes.org
 
 Check help with =org-parse --help=.
 

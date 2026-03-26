@@ -67,11 +67,11 @@ Nano
 
 # 4 Tables
 
-| Name  | Language |
-|-------|----------|
-| Emacs | Lisp     |
-| Vim   | C        |
-| Nano  | C        |
+| Name  | Language | Year |
+|-------|----------|------|
+| Emacs | Lisp     | 1976 |
+| Vim   | C        | 1991 |
+| Nano  | C        | 1999 |
 
 # 5 Blocks
 

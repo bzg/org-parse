@@ -120,7 +120,10 @@
    :blank-lines-before 1,
    :children
    [{:rows
-     [["Name" "Language"] ["Emacs" "Lisp"] ["Vim" "C"] ["Nano" "C"]],
+     [["Name" "Language" "Year"]
+      ["Emacs" "Lisp" "1976"]
+      ["Vim" "C" "1991"]
+      ["Nano" "C" "1999"]],
      :has-header true,
      :type :table}],
    :type :section,

@@ -18,6 +18,8 @@
 
 (def ^:dynamic *parse-errors* nil)
 (def ^:dynamic *base-url* nil)
+(def ^:dynamic *css-theme* nil)
+(def ^:private pico-themes-cdn "https://cdn.jsdelivr.net/gh/bzg/pico-themes@main/")
 
 (defn- add-parse-error! [line-num message]
   (when *parse-errors*
@@ -1399,9 +1401,9 @@
 ;; AST Filtering
 (defn- section? [node] (= (:type node) :section))
 
-(defn- section-matches? [section {:keys [max-level title-pattern id-pattern]}]
+(defn- section-matches? [section {:keys [level-limit title-pattern id-pattern]}]
   (let [level (:level section)]
-    (and (or (nil? max-level) (<= level max-level))
+    (and (or (nil? level-limit) (<= level level-limit))
          (or (nil? title-pattern) (when-let [title (:title section)] (re-find title-pattern title)))
          (or (nil? id-pattern)
              (when-let [id (get-in section [:properties :id])] (re-find id-pattern id))
@@ -1434,24 +1436,24 @@
 (declare ^:private flatten-deep-sections-expand)
 
 (defn- flatten-deep-sections
-  "Transform sections deeper than max-level-all: convert their headings to bold
+  "Transform sections deeper than level-limit-inclusive: convert their headings to bold
    paragraphs and inline their children into the parent's child list."
-  [node max-level-all]
-  (if (nil? max-level-all)
+  [node level-limit-inclusive]
+  (if (nil? level-limit-inclusive)
     node
     (case (:type node)
-      :document (update node :children #(vec (mapcat (fn [c] (flatten-deep-sections-expand c max-level-all)) %)))
-      :section (if (<= (:level node) max-level-all)
-                 (update node :children #(vec (mapcat (fn [c] (flatten-deep-sections-expand c max-level-all)) %)))
+      :document (update node :children #(vec (mapcat (fn [c] (flatten-deep-sections-expand c level-limit-inclusive)) %)))
+      :section (if (<= (:level node) level-limit-inclusive)
+                 (update node :children #(vec (mapcat (fn [c] (flatten-deep-sections-expand c level-limit-inclusive)) %)))
                  node)
       node)))
 
 (defn- flatten-deep-sections-expand
-  "For a single child node: if it's a section beyond max-level-all, return
+  "For a single child node: if it's a section beyond level-limit-inclusive, return
    a bold paragraph for its title followed by its children (recursively flattened).
    Otherwise return the node unchanged (wrapped in a vector)."
-  [node max-level-all]
-  (if (and (= (:type node) :section) (> (:level node) max-level-all))
+  [node level-limit-inclusive]
+  (if (and (= (:type node) :section) (> (:level node) level-limit-inclusive))
     (let [title (:title node)
           todo-prefix (when (:todo node) (str (name (:todo node)) " "))
           priority-prefix (when (:priority node) (str "[#" (:priority node) "] "))
@@ -1459,14 +1461,14 @@
           bold-title (str todo-prefix priority-prefix "*" title "*" tags-suffix)
           title-para (make-node :paragraph :content bold-title
                                 :blank-lines-before (:blank-lines-before node))
-          children (mapcat #(flatten-deep-sections-expand % max-level-all) (:children node))]
+          children (mapcat #(flatten-deep-sections-expand % level-limit-inclusive) (:children node))]
       (into [title-para] children))
-    [(flatten-deep-sections node max-level-all)]))
+    [(flatten-deep-sections node level-limit-inclusive)]))
 
 (defn- filter-ast [ast opts]
-  (let [filter-needed (some (comp some? val) (dissoc opts :max-level-all))
+  (let [filter-needed (some (comp some? val) (dissoc opts :level-limit-inclusive))
         filtered (if filter-needed (filter-ast-node ast opts) ast)]
-    (flatten-deep-sections filtered (:max-level-all opts))))
+    (flatten-deep-sections filtered (:level-limit-inclusive opts))))
 
 ;; AST Content Rendering
 (defn- render-content-in-node [node render-format]
@@ -1565,6 +1567,8 @@ li > p { margin-top: 0.5em; }
          "  <meta charset=\"UTF-8\">\n"
          "  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n"
          "  <title>" (escape-html title) "</title>\n"
+         (when *css-theme*
+           (str "  <link rel=\"stylesheet\" href=\"" *css-theme* "\">\n"))
          (when has-code
            (str "  <link rel=\"stylesheet\" href=\"" hljs-cdn "/styles/default.min.css\">\n"))
          "  <style>\n" html-styles "\n  </style>\n"
@@ -2397,23 +2401,42 @@ li > p { margin-top: 0.5em; }
          (str/join "\n"))))
 
 ;; CLI Options
+
+(def ^:private predefined-css-themes #{"org" "swh" "doric" "lincoln" "teletype" "dsfr"})
+
+(defn- resolve-css-theme
+  "Resolve a CSS theme value to a stylesheet URL or local path.
+  Predefined themes resolve to the pico-themes CDN.
+  A URL (http/https) is used as-is.
+  Otherwise, treated as a local file path (must exist)."
+  [v]
+  (cond
+    (predefined-css-themes v) (str pico-themes-cdn v ".css")
+    (re-matches #"https?://.*" v) v
+    (.exists (java.io.File. v)) v
+    :else (throw (ex-info (str "CSS theme not found: " v
+                               " (expected one of " (str/join ", " (sort predefined-css-themes))
+                               ", a URL, or a local file path)")
+                          {:theme v}))))
+
 (def ^:private cli-options
-  [["-h" "--help" "Show help"]
+  [["-b" "--base-url URL" "Base URL prepended to relative links (include trailing slash)"]
+   ["-c" "--css-theme THEME" "CSS theme: org, swh, doric, lincoln, teletype, a local .css file, or a URL"]
    ["-f" "--format FORMAT" "Output format: json, edn, yaml, md, html, org, or ics"
     :default "json" :validate [#{"json" "edn" "yaml" "md" "html" "org" "ics"} "Must be: json, edn, yaml, md, html, org, ics"]]
+   ["-h" "--help" "Show help"]
+   ["-i" "--id REGEX" "Filter: ID or CUSTOM_ID matches" :parse-fn re-pattern]
+   ["-I" "--section-id REGEX" "Filter: ancestor ID or CUSTOM_ID matches" :parse-fn re-pattern]
+   ["-l" "--level-limit LEVEL" "Filter: level <= LEVEL"
+    :parse-fn #(Integer/parseInt %) :validate [pos? "Must be positive"]]
+   ["-L" "--level-limit-inclusive LEVEL" "Filter: level <= LEVEL and render deeper headings as bold"
+    :parse-fn #(Integer/parseInt %) :validate [pos? "Must be positive"]]
+   ["-n" "--no-unwrap" "Preserve original line breaks"]
    ["-r" "--render FORMAT" "Content rendering format in AST output: md, html, or org"
     :default "md" :validate [#{"md" "html" "org"} "Must be: md, html, org"]]
    ["-s" "--stats" "Compute and display document statistics"]
-   ["-n" "--no-unwrap" "Preserve original line breaks"]
    ["-t" "--title REGEX" "Filter: section title matches" :parse-fn re-pattern]
-   ["-T" "--section-title REGEX" "Filter: ancestor title matches" :parse-fn re-pattern]
-   ["-i" "--id REGEX" "Filter: ID or CUSTOM_ID matches" :parse-fn re-pattern]
-   ["-I" "--section-id REGEX" "Filter: ancestor ID or CUSTOM_ID matches" :parse-fn re-pattern]
-   ["-m" "--max-level LEVEL" "Filter: level <= LEVEL"
-    :parse-fn #(Integer/parseInt %) :validate [pos? "Must be positive"]]
-   ["-M" "--max-level-all LEVEL" "Filter: level <= LEVEL but render deeper headings as bold"
-    :parse-fn #(Integer/parseInt %) :validate [pos? "Must be positive"]]
-   ["-b" "--base-url URL" "Base URL prepended to relative links (include trailing slash)"]])
+   ["-T" "--section-title REGEX" "Filter: ancestor title matches" :parse-fn re-pattern]])
 
 (defn- usage [summary]
   (str/join \newline
@@ -2456,11 +2479,13 @@ li > p { margin-top: 0.5em; }
                                  (exit-error (str "File not found - " file-path)))))]
         (try
           (binding [*base-url* (when-let [u (:base-url options)]
-                                 (cond-> u (not (str/ends-with? u "/")) (str "/")))]
+                                 (cond-> u (not (str/ends-with? u "/")) (str "/")))
+                   *css-theme* (when-let [v (:css-theme options)]
+                                 (resolve-css-theme v))]
             (let [unwrap? (not (:no-unwrap options))
                   ast (parse-org org-content {:unwrap? unwrap?})
-                  filter-opts {:max-level (:max-level options)
-                               :max-level-all (:max-level-all options)
+                  filter-opts {:level-limit (:level-limit options)
+                               :level-limit-inclusive (:level-limit-inclusive options)
                                :title-pattern (:title options)
                                :id-pattern (:id options)
                                :section-title-pattern (:section-title options)

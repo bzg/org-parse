@@ -8,6 +8,9 @@
   <style>
 body { font-family: sans-serif; line-height: 1.6; margin: 2em auto; max-width: 800px; padding: 0 1em; }
 h1, h2, h3, h4, h5, h6 { line-height: 1.2; }
+header { margin-bottom: 1.5em; }
+header .document-title { margin-bottom: 0.2em; padding-bottom: 0.2em; border-bottom: 3px solid; border-color: #ccc; }
+.subtitle { color: #555; font-size: 1.2em; margin-top: 0; }
 pre { background-color: #f8f8f8; border: 1px solid #ddd; border-radius: 4px; padding: 1em; overflow-x: auto; }
 code { font-family: monospace; }
 img { max-width: 100%; }
@@ -36,7 +39,9 @@ li > p { margin-top: 0.5em; }
   </style>
 </head>
 <body>
-<h1>Test Document</h1>
+<header>
+<h1 class="document-title">Test Document</h1>
+</header>
 <nav id="table-of-contents">
 <h2>Table of Contents</h2>
 <ul>
@@ -124,18 +129,18 @@ li > p { margin-top: 0.5em; }
 <table>
   <thead>
     <tr>
-      <th>Name</th><th>Language</th>
+      <th>Name</th><th>Language</th><th>Year</th>
     </tr>
   </thead>
   <tbody>
     <tr>
-      <td>Emacs</td><td>Lisp</td>
+      <td>Emacs</td><td>Lisp</td><td>1976</td>
     </tr>
     <tr>
-      <td>Vim</td><td>C</td>
+      <td>Vim</td><td>C</td><td>1991</td>
     </tr>
     <tr>
-      <td>Nano</td><td>C</td>
+      <td>Nano</td><td>C</td><td>1999</td>
     </tr>
   </tbody>
 </table>
