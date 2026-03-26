@@ -1,6 +1,10 @@
 #+title: Org parse
 
-Take an Org file and output it as data in json/yaml/edn format, or export it to md/html/org.
+⚠️ org-parse is not maintained anymore, see [[https://codeberg.org/bzg/organ][organ]] (a Clojure Org
+parser) and [[https://codeberg.org/bzg/hop][hop]] (a CLI tool to parse & export Org files).
+
+Take an Org file and output it as data in json/yaml/edn format, or
+export it to md/html/org.
 
 * Usage
 
